@@ -1,29 +1,61 @@
 # dsh-filmcraft-progress
 
 > A [DeepSeek Harness](https://github.com/anywhere-labs/deepseek-harness-desktop) plugin that shows
-> **live FilmCraft video-editing / colour-grading progress** in the GUI — a sidebar entry, a floating
-> panel and a settings section. It reads a local status file plus live sampling of the output file,
-> so it never touches the encoder process.
+> **live FilmCraft video-editing / colour-grading progress** in the GUI — and lets you do
+> **basic cutting without leaving DSH**: trim, delete, reorder, grade, export.
 
-DSH 面板插件：**实时查看 FilmCraft 视频剪辑 / 调色的进度**。
+DSH 面板插件：**实时查看 FilmCraft 视频剪辑 / 调色的进度，并直接做基础剪辑**。
 
-侧边栏一个入口 + 浮层面板 + 设置页，显示导出百分比、已用时、预计剩余、写入速度、
-输出大小、分镜表、调色参数。数据全部来自本地文件采样，不占用剪辑进程。
+右侧栏一个常驻标签，两页：
+
+- **进度** —— 导出百分比、已用时、预计剩余、写入速度、输出大小、片段表、调色参数。
+  数据来自本地文件采样，不占用剪辑进程。
+- **剪辑** —— 打开 `.fcproj` 工程，裁头/裁尾、删除、上下移、套调色、撤销、导出。
 
 ```
 ┌──────────────────────────────────────────────────────┐
+│ [ 进度 ] [ 剪辑 ]                                    │
 │ FilmCraft 剪辑进度                        ● 导出中   │
-│ 深圳天文台 · 调色成片 · 3840×2880 · 25fps · 29 个镜头│
+│ 逐段调色 · 3840×2880 · 33 段素材                     │
 ├──────────────────────────────────────────────────────┤
 │ ████████████████████████░░░░░░░░░░░░░░░░░░░  51.3%   │
 │ 按输出文件大小估算                                   │
 ├──────────────────────────────────────────────────────┤
 │ 已用时 54:28 │ 预计剩余 46:40 │ 0.78 MB/s │ 1395/2900 MB │
 ├──────────────────────────────────────────────────────┤
-│ 分镜表 (29)  #1 0310  #2 0313  …  #10 0319[裁]  …     │
-│ 成片规格     调色参数     备注                        │
+│ 片段表 (33)  #1 0310 山路 7.6s 已完成                 │
+│              #2 0319 海景 8.0s 导出中                 │
+│              #3 0322 海景 8.0s 待处理   …             │
 └──────────────────────────────────────────────────────┘
 ```
+
+## 两种模式
+
+任务分两类，面板按 `mode` 字段换版式 —— 它们不是同一件事：
+
+| 模式 | 是什么 | 面板怎么显示 |
+|---|---|---|
+| `batch` | **逐段调色**：每条素材各自调色、各自导出一个文件 | 「片段表」+ 每段自己的状态（待处理/导出中/已完成/失败）、时长、帧率 |
+| `film` | **成片剪辑**：多段剪成一条时间线 | 「分镜表」+ 成片时间码、裁剪标记 |
+
+## 剪辑页
+
+右侧栏面板的第二个标签，用来处理「基本问题」：
+
+| 操作 | 说明 |
+|---|---|
+| **扫描 / 打开工程** | 扫描配置目录下的 `.fcproj`（默认 `D:\Myfiles\临时`） |
+| **裁头 / 裁尾** | ±0.5s / +1s / +3s，波纹模式（自动合拢，不留空隙） |
+| **删除** | 波纹删除选中片段 |
+| **上移 / 下移** | 与相邻片段交换位置 |
+| **套调色** | 海景 / 山路 / 猫 / 中性 / 清空 —— 与批处理流水线同一套参数 |
+| **停用 / 启用** | 保留片段但不参与输出 |
+| **撤销** | 还原到上一次编辑前的工程快照 |
+| **导出** | 选中片段或整条序列，后台跑，回「进度」页看百分比 |
+
+> **为什么撤销用快照**：`filmcraft-cli` 每次调用都是独立进程，撤销栈随进程结束消失，
+> `--save` 存的是结果不是历史。所以每次编辑前把工程复制一份到 `snapshots/`
+> （保留最近 20 份），撤销即还原最新快照。这比 CLI 自带的 undo 可靠。
 
 ## 安装
 
@@ -59,7 +91,7 @@ node "<DSH>/resources/runtime/pnpm/bin/pnpm.cjs" install
 
 | 位置 | 内容 |
 |---|---|
-| **右侧栏标签**「剪辑进度」 | 完整面板（进度条 / 统计 / 分镜 / 调色参数） |
+| **右侧栏标签**「剪辑进度」 | 完整面板：**进度**页 + **剪辑**页 |
 | **左侧栏底部入口** | 点一下打开上面的右侧栏标签；任务运行时直接显示百分比 |
 | **设置 → 剪辑进度** | 同一个面板，宽屏版式 |
 
@@ -88,6 +120,7 @@ FILMCRAFT_PROGRESS_FILE=D:\别的\地方\film-status.json
 
 ```jsonc
 {
+  "mode": "batch",                // batch=逐段调色 | film=成片剪辑（缺省按 film 处理）
   "project": "深圳天文台 · 调色成片",
   "phase": "export",              // idle|plan|import|build|grade|crop|export|done|error
   "phaseLabel": "导出中",
@@ -109,6 +142,9 @@ FILMCRAFT_PROGRESS_FILE=D:\别的\地方\film-status.json
 
 只有 `project` 和 `export.path` 是必需的。百分比优先用
 `bytes / expectedBytes`，没有就退回 `elapsed / expectedMs`。
+
+`mode: "batch"` 时，`shots[]` 每项建议带 `status`（`pending` / `exporting` / `done` / `failed`）
+与 `fps`，面板据此画每段自己的状态徽标。
 
 ## 怎么写入进度
 
@@ -139,11 +175,50 @@ node tools/publish.cjs show
 
 ## Agent 工具
 
-插件同时注册了工具 **`filmcraft_progress`**，Agent 可以直接读同一份状态：
+插件注册了两个工具，Agent 可以直接用：
+
+**`filmcraft_progress`** —— 读同一份进度状态：
 
 ```json
-{ "ok": true, "percent": 51.3, "etaText": "46:40", "shots": [ ... ] }
+{ "ok": true, "percent": 51.3, "etaText": "46:40", "mode": "batch", "shots": [ ... ] }
 ```
+
+**`filmcraft_edit`** —— 基础剪辑，`action` 取 `projects` / `open` / `apply` / `undo` / `export`：
+
+```jsonc
+// 看有哪些工程
+{ "action": "projects" }
+
+// 打开并列出片段
+{ "action": "open", "project": "D:\\...\\final.fcproj" }
+
+// 把第 1 段头部裁掉 1 秒（254016000000 ticks = 1 秒）
+{ "action": "apply", "project": "D:\\...\\final.fcproj",
+  "commands": [{ "id": "timeline.trim",
+                 "params": { "clip": 69, "edge": "in", "mode": "ripple", "delta": 254016000000 } }] }
+
+// 撤销 / 导出
+{ "action": "undo", "project": "D:\\...\\final.fcproj" }
+{ "action": "export", "project": "D:\\...\\final.fcproj", "out": "D:\\out.mp4", "start": 0, "end": 12 }
+```
+
+`apply` 只接受白名单内的命令（剪辑与调色相关），不是 700 条命令的遥控器。
+
+## HTTP 接口
+
+Host 注册了这些路由（面板走同一批）：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/dsh-filmcraft-progress/api/state` | 进度状态 |
+| GET | `/dsh-filmcraft-progress/api/projects` | 扫描工程文件 |
+| POST | `/dsh-filmcraft-progress/api/open` | 打开工程并列出片段 |
+| POST | `/dsh-filmcraft-progress/api/apply` | 执行编辑（白名单） |
+| POST | `/dsh-filmcraft-progress/api/undo` | 还原工程快照 |
+| POST | `/dsh-filmcraft-progress/api/export` | 后台导出 |
+
+可用环境变量覆盖：`FILMCRAFT_CLI`（CLI 路径）、`FILMCRAFT_ROOTS`（扫描根目录，`;` 分隔）、
+`FILMCRAFT_EXPORT_DIR`、`FILMCRAFT_LOG_DIR`、`FILMCRAFT_PROGRESS_FILE`。
 
 ## 设计要点
 
@@ -177,6 +252,11 @@ Host 侧由构建脚本注入 `node:fs` 导入和 HTTP 路由外壳；Client 侧
 | 百分比一直 `—` | `expectedBytes` 和 `expectedMs` 都没给，或输出文件还没生成 |
 | 速度一直 `—` | 只轮询过一次，等一轮 |
 | 任务已完成但显示「导出中」 | 输出文件仍在被写；30 秒无写入会自动转「已完成」 |
+| **分镜表是空的/只剩细横条** | `.fc-shot` 缺 `flex-shrink: 0`，被纵向 flex 容器压扁（0.2.0 已修） |
+| **「剪辑」页报「unsupported call」或 404** | Host 侧改了路由，**必须重启 DSH**（宿主进程内加载，刷新页面不够） |
+
+> **改了 `src/dynamic/host.js` 之后要重启 DSH**：host 插件在宿主进程内被 import，
+> 没有热重载 API，`patchReload: live` 也不会重新 import 模块。改 client 侧刷新页面即可。
 
 ## License
 

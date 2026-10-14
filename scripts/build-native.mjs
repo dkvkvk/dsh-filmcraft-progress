@@ -9,13 +9,29 @@ const nativeDir = join(root, 'dist', 'native')
 const indent = (value, spaces) => value.split('\n').map((line) => ' '.repeat(spaces) + line).join('\n')
 
 const PKG = 'dsh-filmcraft-progress'
-const STATE_PATH = '/dsh-filmcraft-progress/api/state'
+const BASE = '/dsh-filmcraft-progress/api'
+
+// Every host handler and the HTTP route that exposes it.  GET for reads,
+// POST for anything that edits a project or starts work.
+const ROUTES = [
+  ['progress.state', 'GET', BASE + '/state'],
+  ['edit.projects', 'GET', BASE + '/projects'],
+  ['edit.open', 'POST', BASE + '/open'],
+  ['edit.apply', 'POST', BASE + '/apply'],
+  ['edit.undo', 'POST', BASE + '/undo'],
+  ['edit.export', 'POST', BASE + '/export'],
+]
 
 // `type: 'json'` is not a valid JSON-Schema type — widen it.
 const hostBody = host.replaceAll("schema: { type: 'json' }", "schema: { type: 'object', additionalProperties: true }")
 
+const routeTable = '{\n' + ROUTES
+  .map(([key, method, path]) => `      '${key}': { method: '${method}', path: '${path}' },`)
+  .join('\n') + '\n    }'
+
 const nativeHost = [
-  "import { readFileSync, statSync, existsSync } from 'node:fs'",
+  "import { readFileSync, statSync, existsSync, readdirSync, openSync, closeSync, writeFileSync, mkdirSync, copyFileSync, rmSync } from 'node:fs'",
+  "import { spawnSync, spawn } from 'node:child_process'",
   '',
   'function defineTool(options) {',
   '  const properties = {}',
@@ -39,43 +55,62 @@ const nativeHost = [
   'export const name = plugin.name',
   "export const inject = [...new Set([...plugin.inject, 'webServer'])]",
   '',
-  'function registerRoute(ctx, path, handler, label) {',
+  'function readBody(req) {',
+  '  return new Promise((resolve, reject) => {',
+  "    let raw = ''",
+  "    req.on('data', (chunk) => {",
+  '      raw += chunk',
+  "      if (raw.length > 4e6) { reject(new Error('request body too large')); req.destroy() }",
+  '    })',
+  "    req.on('end', () => {",
+  "      if (!raw) return resolve(null)",
+  "      try { resolve(JSON.parse(raw)) } catch (_) { reject(new Error('invalid JSON body')) }",
+  '    })',
+  "    req.on('error', reject)",
+  '  })',
+  '}',
+  '',
+  'function registerRoute(ctx, route, handler, label) {',
   '  return ctx.effect(() => ctx.webServer.register({',
   "    kind: 'exact',",
-  '    path,',
+  '    path: route.path,',
   '    async handler(req, res) {',
-  "      if (req.method !== 'GET') {",
-  '        res.writeHead(405)',
-  '        res.end()',
-  '        return',
-  '      }',
-  '      try {',
-  '        const value = await handler()',
-  "        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })",
+  '      const send = (code, value) => {',
+  "        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })",
   '        res.end(JSON.stringify(value))',
+  '      }',
+  "      if (req.method !== route.method) return send(405, { error: 'method not allowed' })",
+  '      try {',
+  "        const body = req.method === 'POST' ? await readBody(req) : null",
+  '        send(200, await handler(body))',
   '      } catch (error) {',
-  '        res.writeHead(500, { \'content-type\': \'application/json; charset=utf-8\' })',
-  "        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))",
+  "        send(500, { error: error instanceof Error ? error.message : String(error) })",
   '      }',
   '    },',
   '  }), label)',
   '}',
   '',
   'export function apply(ctx) {',
+  '  const routes = ' + routeTable,
   '  const harness = {',
   '    defineTool,',
   '    registerTool(_context, tool) {',
   "      return ctx.effect(() => ctx.tools.register(tool), '" + PKG + ": tool ' + tool.name)",
   '    },',
   '    handle(key, handler) {',
-  "      if (key === 'progress.state') return registerRoute(ctx, '" + STATE_PATH + "', () => handler({}), '" + PKG + ": state')",
-  "      throw new Error('unsupported progress handler: ' + key)",
+  '      const route = routes[key]',
+  "      if (route === undefined) throw new Error('unsupported handler: ' + key)",
+  "      return registerRoute(ctx, route, (body) => handler(body || {}), '" + PKG + ": ' + key)",
   '    },',
   '  }',
   '  return createPlugin(harness).apply(ctx)',
   '}',
   '',
 ].join('\n')
+
+const clientRoutes = '{\n' + ROUTES
+  .map(([key, method, path]) => `        '${key}': ['${method}', '${path}'],`)
+  .join('\n') + '\n      }'
 
 const nativeClient = [
   'window.__ModuleLoader__.load({',
@@ -94,12 +129,18 @@ const nativeClient = [
   '    }',
   '    var host = {',
   '      call: async function (name, arg) {',
-  "        var pathMap = { 'progress.state': '" + STATE_PATH + "' }",
-  '        var path = pathMap[name]',
-  "        if (path === undefined) throw new Error('unsupported progress call: ' + name)",
-  "        var response = await fetch(path, { cache: 'no-store' })",
+  '        var routes = ' + clientRoutes,
+  '        var route = routes[name]',
+  "        if (route === undefined) throw new Error('unsupported call: ' + name)",
+  "        var init = { cache: 'no-store' }",
+  "        if (route[0] === 'POST') {",
+  "          init.method = 'POST'",
+  "          init.headers = { 'content-type': 'application/json' }",
+  '          init.body = JSON.stringify(arg || {})',
+  '        }',
+  '        var response = await fetch(route[1], init)',
   '        var value = await response.json()',
-  "        if (!response.ok) throw new Error(value && value.error ? value.error : 'progress request failed')",
+  "        if (!response.ok) throw new Error(value && value.error ? value.error : 'request failed')",
   '        return value',
   '      },',
   '    }',
@@ -119,3 +160,5 @@ writeFileSync(join(nativeDir, 'client.js'), nativeClient, 'utf8')
 console.log('Built ' + PKG)
 console.log('  dist/native/index.js   ' + nativeHost.length + ' B')
 console.log('  dist/native/client.js  ' + nativeClient.length + ' B')
+console.log('  routes:')
+for (const [key, method, path] of ROUTES) console.log('    ' + method.padEnd(5) + path + '   (' + key + ')')
