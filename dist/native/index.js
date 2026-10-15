@@ -234,6 +234,9 @@ function createPlugin(harness) {
       }
   
       // Bounded recursive scan for project files, newest first.
+      // Undo snapshots live next to the projects and are also `.fcproj`, so they
+      // are filtered out — otherwise the picker fills up with our own backups.
+      const SNAP_NAME = /\.fcproj\.\d+\.fcproj$/i
       function scanProjects() {
         const found = []
         let budget = 4000
@@ -245,9 +248,9 @@ function createPlugin(harness) {
             if (budget-- <= 0) return
             const full = dir + '\\' + e.name
             if (e.isDirectory()) {
-              if (e.name === 'node_modules' || e.name.charAt(0) === '.') continue
+              if (e.name === 'node_modules' || e.name === 'snapshots' || e.name.charAt(0) === '.') continue
               walk(full, depth + 1)
-            } else if (/\.fcproj$/i.test(e.name)) {
+            } else if (/\.fcproj$/i.test(e.name) && !SNAP_NAME.test(e.name)) {
               let size = 0, mtime = 0
               try { const s = statSync(full); size = s.size; mtime = s.mtimeMs } catch (_) { }
               found.push({ path: full, name: e.name, size, mtime })

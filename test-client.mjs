@@ -1,15 +1,18 @@
 // Render the built client bundle without a browser.
 //
-// React is mocked with hooks that keep state across re-renders, so the whole
-// render path runs for real: the panel polls (mocked fetch), the store
-// publishes, and the component re-renders with data.  This catches render-time
-// crashes that a syntax check cannot.
+// React is mocked faithfully enough to catch the bug class that broke the real
+// panel: useState state persists across renders and a setter whose value is
+// Object.is-equal to the current state does NOT schedule a re-render.  A store
+// that notifies listeners with no argument (setter(undefined) twice in a row)
+// therefore silently stops repainting — and this test fails instead of passing.
 import { readFileSync } from 'node:fs'
 
 // ── minimal React ───────────────────────────────────────────────────────────
-let hookState = []
+let hookOwner = null
+const hooksByOwner = new Map()   // component function -> hook slots
 let hookIndex = 0
 let effectQueue = []
+let dirty = false                // did any setter actually change a value?
 
 function createElement(type, props, ...children) {
   const flat = []
@@ -25,12 +28,26 @@ function createElement(type, props, ...children) {
 const React = {
   createElement,
   useState(init) {
+    const slots = hooksByOwner.get(hookOwner) || []
+    hooksByOwner.set(hookOwner, slots)
     const i = hookIndex++
-    if (!(i in hookState)) hookState[i] = typeof init === 'function' ? init() : init
-    const set = (v) => { hookState[i] = typeof v === 'function' ? v(hookState[i]) : v }
-    return [hookState[i], set]
+    if (!(i in slots)) slots[i] = { value: typeof init === 'function' ? init() : init, ran: false }
+    const slot = slots[i]
+    const set = (v) => {
+      const next = typeof v === 'function' ? v(slot.value) : v
+      // React's eager bailout: an identical value schedules no work at all.
+      if (Object.is(next, slot.value)) return
+      slot.value = next
+      dirty = true
+    }
+    return [slot.value, set]
   },
-  useEffect(fn) { effectQueue.push(fn); hookIndex++ },
+  useEffect(fn) {
+    const slots = hooksByOwner.get(hookOwner)
+    const i = hookIndex++
+    const slot = slots[i] || (slots[i] = { value: undefined, ran: false })
+    if (!slot.ran) { slot.ran = true; effectQueue.push(fn) }   // models [] deps
+  },
   useMemo(fn) { return fn() },
   useRef(v) { return { current: v } },
 }
@@ -111,22 +128,18 @@ const slots = {
   register(meta, render) { const r = { meta, render }; registrations.push(r); return r },
 }
 const ctx = {
-  get(name) {
-    if (name === 'slots') return slots
-    if (name === 'sidebarRightTabs' || name === 'sidebarRight') return undefined
-    return undefined
-  },
+  get(name) { if (name === 'slots') return slots; return undefined },
   slots,
   effect(fn) { const d = fn(); return typeof d === 'function' ? d : () => { } },
   timer: { setTimeout: (f, ms) => setTimeout(f, ms) },
 }
 mod.apply(ctx)
 console.log('注册槽位 ' + registrations.length + ' 个：' + registrations.map(r => r.meta.name).join(', '))
-console.log('样式表 ' + styleTags.length + ' 条，共 ' + (styleTags.join('').length) + ' 字符\n')
+console.log('样式表 ' + styleTags.length + ' 条，' + (styleTags.join('').length) + ' 字符\n')
 
-// ── render ──────────────────────────────────────────────────────────────────
+// ── render / paint ──────────────────────────────────────────────────────────
 function expand(node, depth) {
-  if (depth > 60) throw new Error('渲染过深（可能是无限递归）')
+  if (depth > 60) throw new Error('渲染过深（可能无限递归）')
   if (node === null || node === undefined || typeof node !== 'object') return node
   if (Array.isArray(node)) return node.map(n => expand(n, depth + 1))
   const { type, props, children } = node
@@ -134,7 +147,13 @@ function expand(node, depth) {
     const p = Object.assign({}, props)
     if (children.length === 1) p.children = children[0]
     else if (children.length > 1) p.children = children
-    return expand(type(p), depth + 1)
+    const prevOwner = hookOwner
+    const prevIndex = hookIndex
+    hookOwner = type
+    hookIndex = 0
+    let out
+    try { out = expand(type(p), depth + 1) } finally { hookOwner = prevOwner; hookIndex = prevIndex }
+    return out
   }
   return { type, props, children: children.map(c => expand(c, depth + 1)) }
 }
@@ -148,48 +167,32 @@ function textOf(node, out) {
   return out
 }
 
-function render(component, props) {
-  hookState = []
-  hookIndex = 0
+const settings = registrations.find(r => r.meta.name === 'settings.section')
+if (settings === undefined) { console.log('❌ 没有 settings.section 注册'); process.exit(1) }
+const mount = () => settings.render()
+
+let currentTree = null
+let failed = false
+
+function renderOnce() {
   effectQueue = []
-  const tree = expand(React.createElement(component, props), 0)
-  // React runs effects after paint; the panel's poller and listener wiring live
-  // there, so nothing would ever fetch without this.
+  dirty = false
+  const tree = expand(React.createElement(mount().type, mount().props), 0)
   for (const fn of effectQueue) { try { fn() } catch (e) { console.log('   effect 抛错: ' + e.message) } }
+  currentTree = tree
   return tree
 }
 
-const settings = registrations.find(r => r.meta.name === 'settings.section')
-if (settings === undefined) { console.log('❌ 没有 settings.section 注册'); process.exit(1) }
-
-// The settings render returns h(Panel, {wide:true}); call it, then expand.
-let failed = false
-function attempt(label, fn) {
-  try { const t = fn(); console.log('✅ ' + label); return t } catch (e) {
-    failed = true
-    console.log('❌ ' + label + '  →  ' + e.message)
-    console.log(e.stack.split('\n').slice(1, 4).join('\n'))
-    return null
+// Repaint the way React would: only when a setter actually changed something.
+function paint(label) {
+  if (currentTree === null) { console.log('   ' + label + '：首帧'); return renderOnce() }
+  if (!dirty) {
+    console.log('   ' + label + '：⚠️ 没有任何 setter 改变状态 → React 不会重渲染')
+    return currentTree
   }
+  return renderOnce()
 }
 
-console.log('── 渲染 ──')
-let tree = attempt('首屏渲染（进度视图，数据未到）', () => render(settings.render().type, settings.render().props))
-if (tree) console.log('   文本: ' + textOf(tree).join(' | ').slice(0, 200))
-
-// let the poll resolve, then re-render
-await new Promise(r => setTimeout(r, 60))
-tree = attempt('数据到达后渲染（进度视图 · batch 模式）', () => render(settings.render().type, settings.render().props))
-if (tree) {
-  const t = textOf(tree).join(' | ')
-  console.log('   含「片段表」: ' + t.includes('片段表'))
-  console.log('   含「逐段调色」: ' + t.includes('逐段调色'))
-  console.log('   含「导出中 1/33」: ' + t.includes('导出中 1/33'))
-  console.log('   分镜行数（fc-shot）: ' + (JSON.stringify(tree).split('"fc-shot"').length - 1))
-}
-
-console.log('\n── 剪辑视图 ──')
-// flip the editor view by driving the tab button's onClick
 function findClickable(node, label, out) {
   out = out || []
   if (node === null || typeof node !== 'object') return out
@@ -201,36 +204,62 @@ function findClickable(node, label, out) {
   }
   return out
 }
-const tabBtns = findClickable(tree, '剪辑')
-console.log('找到「剪辑」按钮: ' + tabBtns.length)
-if (tabBtns.length) {
-  tabBtns[0].props.onClick()
-  await new Promise(r => setTimeout(r, 80))
-  let editTree = attempt('剪辑视图渲染（工程列表）', () => render(settings.render().type, settings.render().props))
-  // click the project row to open it
-  const rows = findClickable(editTree, 'B_5994fps')
-  console.log('   工程行可点: ' + rows.length)
-  if (rows.length) {
-    rows[0].props.onClick()
-    await new Promise(r => setTimeout(r, 80))
-    editTree = attempt('剪辑视图渲染（工程已打开）', () => render(settings.render().type, settings.render().props))
-  }
-  if (editTree) {
-    const t = textOf(editTree).join(' | ')
-    const missing = []
-    for (const probe of ['扫描', '片段', '裁头', '裁尾', '排序', '调色', '海景', '山路', '撤销', '导出选中片段', '导出整条序列']) {
-      if (!t.includes(probe)) missing.push(probe)
-    }
-    console.log('   缺少的控件: ' + (missing.length ? missing.join(', ') : '无'))
-    console.log('   工程名出现: ' + t.includes('B_5994fps'))
-    console.log('   片段名出现: ' + t.includes('0332_D') + '（应为 true）')
-    console.log('   片段行数: ' + (JSON.stringify(editTree).split('"fc-clip').length - 1) + '（应为 2）')
+
+function attempt(label, fn) {
+  try { const t = fn(); console.log('✅ ' + label); return t } catch (e) {
+    failed = true
+    console.log('❌ ' + label + '  →  ' + e.message)
+    console.log(e.stack.split('\n').slice(1, 4).join('\n'))
+    return currentTree
   }
 }
 
-console.log('\n── 交互调用 ──')
-console.log('已发出的请求：')
-for (const c of calls) console.log('   ' + c.method.padEnd(5) + c.path.replace('/dsh-filmcraft-progress/api/', '') + (c.body ? '  ' + JSON.stringify(c.body).slice(0, 90) : ''))
+function check(ok, label) {
+  console.log((ok ? '   ✓ ' : '   ❌ ') + label)
+  if (!ok) failed = true
+}
 
-console.log('\n' + (failed ? '❌ 有渲染失败' : '✅ 全部渲染通过'))
+console.log('── 首屏 ──')
+let tree = attempt('进度视图渲染', renderOnce)
+console.log('   文本: ' + textOf(tree).join(' | ').slice(0, 90))
+
+await new Promise(r => setTimeout(r, 60))
+console.log('\n── 轮询到达后 ──')
+tree = attempt('重渲染', () => paint('数据到达'))
+{
+  const t = textOf(tree).join(' | ')
+  check(t.includes('片段表'), '出现「片段表」（batch 模式）')
+  check(t.includes('逐段调色'), '出现「逐段调色」')
+  check(t.includes('导出中 1/33'), '出现「导出中 1/33」')
+  check(JSON.stringify(tree).split('"fc-shot"').length - 1 === 4, '分镜 4 行')
+}
+
+console.log('\n── 点击「剪辑」标签（回归：这一击曾经失效）──')
+tree = attempt('点标签', () => { findClickable(tree, '剪辑')[0].props.onClick(); return paint('切换后') })
+check(textOf(tree).join('').includes('扫描'), '剪辑视图出现「扫描」按钮')
+
+await new Promise(r => setTimeout(r, 80))
+tree = attempt('重渲染', () => paint('工程列表到达'))
+{
+  const rows = findClickable(tree, 'B_5994fps')
+  check(rows.length > 0, '工程行出现')
+
+  console.log('\n── 点击工程行（回归：这一击曾经失效）──')
+  rows[0].props.onClick()
+  await new Promise(r => setTimeout(r, 80))
+  tree = attempt('重渲染', () => paint('工程打开后'))
+  const t = textOf(tree).join(' | ')
+  check(t.includes('0332_D'), '片段名出现（工程已打开）')
+  const missing = ['裁头', '裁尾', '排序', '海景', '山路', '撤销', '导出选中片段', '导出整条序列'].filter(x => !t.includes(x))
+  check(missing.length === 0, '编辑控件齐全' + (missing.length ? '，缺：' + missing.join(',') : ''))
+}
+
+console.log('\n── 点击「进度」标签（回归：这一击曾经失效）──')
+tree = attempt('点标签', () => { findClickable(tree, '进度')[0].props.onClick(); return paint('切回后') })
+check(textOf(tree).join('').includes('片段表'), '切回进度视图')
+
+console.log('\n── 已发出的请求 ──')
+for (const c of calls) console.log('   ' + c.method.padEnd(5) + c.path.replace('/dsh-filmcraft-progress/api/', '') + (c.body ? '  ' + JSON.stringify(c.body).slice(0, 80) : ''))
+
+console.log('\n' + (failed ? '❌ 有失败项' : '✅ 全部通过'))
 process.exit(failed ? 1 : 0)

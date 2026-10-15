@@ -241,6 +241,10 @@ return {
     ]
 
     const ed = {
+      // Bumped on every change and handed to the useState setters. Without a
+      // changing value React sees an identical state and skips the re-render
+      // entirely — the click handlers would run but nothing would repaint.
+      version: 0,
       view: 'progress',
       projects: [], project: null, selected: null,
       busy: false, toast: '', error: '',
@@ -249,13 +253,17 @@ return {
     }
     function edSet(patch) {
       for (const k of Object.keys(patch)) ed[k] = patch[k]
-      for (const l of ed.listeners) l()
+      ed.version += 1
+      for (const l of ed.listeners) l(ed.version)
     }
     function useEditor() {
       const pair = React.useState(0)
       React.useEffect(function () {
-        ed.listeners.add(pair[1])
-        return function () { ed.listeners.delete(pair[1]) }
+        const set = pair[1]
+        ed.listeners.add(set)
+        // Re-sync in case this component mounted after an edit already landed.
+        set(ed.version)
+        return function () { ed.listeners.delete(set) }
       }, [])
       return ed
     }

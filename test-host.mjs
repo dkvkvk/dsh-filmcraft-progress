@@ -152,5 +152,17 @@ console.log('\n工具 filmcraft_edit 的 action 校验：')
 try { await tools[1].execute({ action: 'nope' }) } catch (e) { console.log('  ' + e.message) }
 
 for (const d of disposers) { try { d() } catch (_) { } }
-if (existsSync(test)) { const { rmSync } = await import('node:fs'); rmSync(test, { force: true }) }
-console.log('\n完成（测试工程已删除）')
+// Remove the test project AND the undo snapshots it produced — otherwise the
+// project picker keeps listing our own backups.
+{
+  const { rmSync, readdirSync } = await import('node:fs')
+  if (existsSync(test)) rmSync(test, { force: true })
+  const snapDir = 'D:\\Myfiles\\临时\\build\\snapshots'
+  let cleaned = 0
+  try {
+    for (const n of readdirSync(snapDir)) {
+      if (n.indexOf('panel-test.fcproj.') >= 0) { rmSync(snapDir + '\\' + n, { force: true }); cleaned++ }
+    }
+  } catch (_) { }
+  console.log('\n完成（测试工程已删除，清理快照 ' + cleaned + ' 个）')
+}
