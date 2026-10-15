@@ -103,7 +103,9 @@ return {
         '.fc-sec{margin-top:14px}',
         '.fc-sec-h{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:10px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}',
         '.fc-sec-h::after{content:"";flex:1;height:1px;background:var(--line)}',
-        '.fc-shots{display:flex;flex-direction:column;gap:3px;max-height:260px;overflow:auto}',
+        // Viewport-relative caps, so a short window shrinks the lists instead of
+        // pushing the sections below them out of reach.
+        '.fc-shots{display:flex;flex-direction:column;gap:3px;max-height:min(260px,30vh);overflow:auto}',
         '.fc-wrap.wide .fc-shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:6px;max-height:none}',
         // flex:0 0 auto is load-bearing: .fc-shots is a column flex box with a
         // max-height, so without it every row shrinks and the text is clipped away.
@@ -159,7 +161,7 @@ return {
         '.fc-btn.primary{border-color:var(--bar);color:var(--bar)}',
         '.fc-btn.danger:hover:not(:disabled){border-color:var(--err);color:var(--err)}',
         '.fc-btns{display:flex;flex-wrap:wrap;gap:4px}',
-        '.fc-clips{display:flex;flex-direction:column;gap:3px;max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:5px;padding:4px;background:var(--soft)}',
+        '.fc-clips{display:flex;flex-direction:column;gap:3px;max-height:min(230px,26vh);overflow:auto;border:1px solid var(--line);border-radius:5px;padding:4px;background:var(--soft)}',
         '.fc-clip{display:flex;align-items:center;gap:6px;padding:5px 6px;border:1px solid transparent;border-radius:3px;cursor:pointer;flex:0 0 auto;min-height:26px;background:var(--bg)}',
         '.fc-clip:hover{border-color:var(--line)}',
         '.fc-clip.on{border-color:var(--bar);background:var(--soft)}',
@@ -168,11 +170,20 @@ return {
         '.fc-clip-t{color:var(--dim);font-size:9px;flex:0 0 auto}',
         '.fc-g{width:6px;height:6px;border-radius:50%;background:var(--bar);flex:0 0 auto}',
         '.fc-g.none{background:var(--line)}',
-        // preview: the source clips are 3840x2880, so 4:3 matches their frame
-        '.fc-prev{position:relative;width:100%;aspect-ratio:4/3;background:#000;border:1px solid var(--line);border-radius:5px;overflow:hidden;display:flex;align-items:center;justify-content:center;margin-bottom:6px}',
+        // Preview: the source clips are 3840x2880, so 4:3 is their natural frame.
+        // The box must NOT be sized from the panel width — `.fc-wrap.wide` reaches
+        // 1100px and 4:3 of that is 825px tall, which pushed the clip list clean
+        // off screen (reported from a screenshot of the real panel).
+        // Height is definite and the width is derived from aspect-ratio, so the
+        // frame hugs the picture instead of spanning the panel. `width:fit-content`
+        // would not work here: the image's max-content width ignores max-height,
+        // so the container would still be stretched to max-width:100%.
+        '.fc-prev{position:relative;height:min(26vh,200px);aspect-ratio:4/3;width:auto;max-width:100%;margin:0 auto 6px;background:#000;border:1px solid var(--line);border-radius:5px;overflow:hidden;display:flex;align-items:center;justify-content:center}',
         '.fc-prev-i,.fc-prev-v{width:100%;height:100%;object-fit:contain;display:block}',
-        '.fc-prev-none{color:var(--dim);font-size:10px}',
+        '.fc-prev-none{color:var(--dim);font-size:10px;text-align:center;padding:0 8px}',
         '.fc-prev-ov{position:absolute;right:5px;top:5px;padding:2px 6px;border-radius:3px;background:rgba(0,0,0,.65);color:#fff;font-size:9px}',
+        '.fc-fold{cursor:pointer;border:0;background:none;color:var(--dim);font:inherit;font-size:9px;font-weight:700;padding:0;letter-spacing:.05em}',
+        '.fc-fold:hover{color:var(--bar)}',
         '.fc-range{flex:1;min-width:0;height:16px;accent-color:var(--bar)}',
         '.fc-thumb{width:34px;height:20px;flex:0 0 auto;object-fit:cover;border-radius:2px;background:var(--line);display:block}',
         '.fc-thumb-ph{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:9px}',
@@ -262,7 +273,7 @@ return {
       // per-clip thumbnails, and the optional proxy clip.
       frame: null, frameUrl: '', frameLoading: false, frameError: '',
       scrub: 0, thumb: {}, proxy: null, proxyUrl: '', proxyLoading: false, proxyError: '',
-      proxySeconds: 3, thumbDone: 0, thumbTotal: 0,
+      proxySeconds: 3, thumbDone: 0, thumbTotal: 0, prevOpen: true,
       listeners: new Set(),
     }
     function edSet(patch) {
@@ -359,6 +370,8 @@ return {
     function edScrub(v) {
       edSet({ scrub: v })
       if (scrubTimer !== null) clearTimeout(scrubTimer)
+      // Collapsed preview means nobody is looking — don't burn a render per step.
+      if (!ed.prevOpen) return
       // Debounced: dragging the slider must not queue one 1.2 s render per pixel.
       scrubTimer = setTimeout(function () {
         const c = selClip()
@@ -614,15 +627,21 @@ return {
 
           h('div', { className: 'fc-sec' },
             h('div', { className: 'fc-sec-h' },
-              '预览' + (clip === null ? '' : ' · #' + (p.clips.indexOf(clip) + 1) + ' ' + shortName(clip.name))),
-            h('div', { className: 'fc-prev' },
+              '预览' + (clip === null ? '' : ' · #' + (p.clips.indexOf(clip) + 1) + ' ' + shortName(clip.name)),
+              h('button', {
+                className: 'fc-fold', type: 'button',
+                title: s.prevOpen ? '收起画面，给片段列表腾地方' : '展开画面',
+                onClick: function () { edSet({ prevOpen: !s.prevOpen }) },
+              }, s.prevOpen ? '收起画面' : '展开画面')),
+
+            s.prevOpen ? h('div', { className: 'fc-prev' },
               s.proxyUrl
                 ? h('video', { className: 'fc-prev-v', src: s.proxyUrl, controls: true, autoPlay: true, loop: true, playsInline: true })
                 : (s.frameUrl
                   ? h('img', { className: 'fc-prev-i', src: s.frameUrl, alt: '预览画面' })
                   : h('div', { className: 'fc-prev-none' },
                     s.frameLoading ? '渲染中…' : (clip === null ? '选一个片段' : '准备中…'))),
-              s.frameLoading && s.frameUrl ? h('div', { className: 'fc-prev-ov' }, '渲染中…') : null),
+              s.frameLoading && s.frameUrl ? h('div', { className: 'fc-prev-ov' }, '渲染中…') : null) : null,
 
             clip === null ? null : h('div', { className: 'fc-row' },
               h('span', { className: 'fc-lb' }, '时间'),
@@ -653,10 +672,10 @@ return {
 
             s.frameError ? h('div', { className: 'fc-toast err' }, s.frameError) : null,
             s.proxyError ? h('div', { className: 'fc-toast err' }, s.proxyError) : null,
-            h('div', { className: 'fc-hint' },
+            s.prevOpen ? h('div', { className: 'fc-hint' },
               '画面是套过调色的成片效果。拖动时间轴看任意一帧；',
               '「生成预览片段」渲染真实视频，约 0.13 秒/帧（' + s.proxySeconds + ' 秒 ≈ ' +
-              Math.max(1, Math.round(s.proxySeconds * 50 * 0.13)) + ' 秒），结果会缓存。')),
+              Math.max(1, Math.round(s.proxySeconds * 50 * 0.13)) + ' 秒），结果会缓存。') : null),
 
           h('div', { className: 'fc-sec' },
             h('div', { className: 'fc-sec-h' },

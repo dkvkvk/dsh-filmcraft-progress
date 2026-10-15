@@ -334,6 +334,37 @@ console.log('\n── 编辑后缩略图必须跟着刷新 ──')
   check(scales.indexOf(0.25) >= 0, '主预览同时刷新了（scale 0.25）')
 }
 
+console.log('\n── 预览不能撑爆面板 ──')
+{
+  // The preview must never be sized from the panel width: `.fc-wrap.wide`
+  // reaches 1100px and 4:3 of that is 825px tall, which pushed the clip list
+  // clean off screen (reported from a screenshot of the real panel).
+  const { readFileSync } = await import('node:fs')
+  const bundle = readFileSync('dist/native/client.js', 'utf8')
+  check(bundle.indexOf('width:100%;aspect-ratio:4/3') < 0, '预览不再按面板宽度撑高')
+  check(bundle.indexOf('height:min(26vh,200px);aspect-ratio:4/3') >= 0, '预览高度定死、宽度由 4:3 反推')
+  check(bundle.indexOf('max-width:100%') >= 0, '窄面板下预览不溢出')
+
+  tree = attempt('重渲染', () => paint('折叠前'))
+  check(findNodes(tree, 'fc-prev').length === 1, '展开时渲染预览框')
+  check(textOf(tree).join(' | ').indexOf('收起画面') >= 0, '有「收起画面」开关')
+
+  findClickable(tree, '收起画面')[0].props.onClick()
+  await new Promise(r => setTimeout(r, 60))
+  tree = attempt('重渲染', () => paint('折叠后'))
+  check(findNodes(tree, 'fc-prev').length === 0, '收起后预览框消失，不再占高度')
+
+  const beforeFold = frameCalls.length
+  findNodes(tree, 'fc-range')[0].props.onChange({ target: { value: '2.0' } })
+  await new Promise(r => setTimeout(r, 620))
+  check(frameCalls.length === beforeFold, '收起状态下拖动时间轴不再浪费渲染')
+
+  findClickable(tree, '展开画面')[0].props.onClick()
+  await new Promise(r => setTimeout(r, 60))
+  tree = attempt('重渲染', () => paint('再展开'))
+  check(findNodes(tree, 'fc-prev').length === 1, '可以再展开')
+}
+
 console.log('\n── 点击「进度」标签（回归：这一击曾经失效）──')
 tree = attempt('点标签', () => { findClickable(tree, '进度')[0].props.onClick(); return paint('切回后') })
 check(textOf(tree).join('').includes('片段表'), '切回进度视图')
