@@ -252,6 +252,7 @@ window.__ModuleLoader__.load({
               '.fc-fold{cursor:pointer;border:0;background:none;color:var(--dim);font:inherit;font-size:9px;font-weight:700;padding:0;letter-spacing:.05em}',
               '.fc-fold:hover{color:var(--bar)}',
               '.fc-range{flex:1;min-width:0;height:16px;accent-color:var(--bar)}',
+              '.fc-num{width:54px;flex:0 0 auto;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font:inherit;font-size:10px;text-align:center}',
               '.fc-thumb{width:34px;height:20px;flex:0 0 auto;object-fit:cover;border-radius:2px;background:var(--line);display:block}',
               '.fc-thumb-ph{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:9px}',
               '.fc-thumb-prog{color:var(--dim);font-size:9px;font-weight:400}',
@@ -517,13 +518,25 @@ window.__ModuleLoader__.load({
             thumbPump()
           }
       
+          // A fixed 2/3/5/10 menu never fits: the useful length is usually "this much of
+          // this clip". So the length is a free number instead, bounded by what the host
+          // will actually render (PROXY_MAX_SECONDS there is 20).
+          const PROXY_MAX = 20
+          function proxySpan() {
+            const v = Number(ed.proxySeconds)
+            if (!Number.isFinite(v) || v <= 0) return 3
+            return Math.min(PROXY_MAX, Math.max(0.5, Math.round(v * 10) / 10))
+          }
+      
           async function edMakeProxy() {
             const p = ed.project
             const c = selClip()
             if (!p || c === null) return
+            const span = proxySpan()
+            if (span !== ed.proxySeconds) edSet({ proxySeconds: span })
             const start = c.start + ed.scrub
-            const end = Math.min(c.start + c.dur, start + ed.proxySeconds)
-            if (end - start < 0.2) { edSet({ proxyError: '这个位置往后不足 0.2 秒，换个时间点再试' }); return }
+            const end = Math.min(c.start + c.dur, start + span)
+            if (end - start < 0.2) { edSet({ proxyError: '这个位置往后不足 0.2 秒，把时间轴往前拖一点再试' }); return }
             edSet({ proxyLoading: true, proxyError: '', proxy: null })
             try {
               const r = await host.call('edit.proxy', { project: p.path, start: start, end: end, scale: 0.25, quality: 60 })
@@ -534,6 +547,14 @@ window.__ModuleLoader__.load({
             } catch (e) {
               edSet({ proxyLoading: false, proxyError: errText(e) })
             }
+          }
+      
+          // The whole clip, capped at what the host will render.
+          function edProxyWholeClip() {
+            const c = selClip()
+            if (c === null) return
+            edSet({ proxySeconds: Math.min(PROXY_MAX, Math.max(0.5, Math.round(c.dur * 10) / 10)), scrub: 0 })
+            edRefreshFrame()
           }
       
           async function edProjects() {
@@ -728,10 +749,19 @@ window.__ModuleLoader__.load({
       
                   clip === null ? null : h('div', { className: 'fc-row' },
                     h('span', { className: 'fc-lb' }, '视频'),
-                    h('select', {
-                      className: 'fc-sel', value: String(s.proxySeconds),
-                      onChange: function (e) { edSet({ proxySeconds: Number(e.target.value) }) },
-                    }, [2, 3, 5, 10].map(function (n) { return h('option', { value: String(n), key: String(n) }, n + ' 秒') })),
+                    h('input', {
+                      className: 'fc-num', type: 'number', min: 0.5, max: PROXY_MAX, step: 0.5,
+                      value: String(s.proxySeconds),
+                      title: '预览片段长度，0.5 – ' + PROXY_MAX + ' 秒',
+                      onChange: function (e) { edSet({ proxySeconds: e.target.value }) },
+                      // Typing "1" on the way to "15" must not be clamped mid-keystroke.
+                      onBlur: function () { edSet({ proxySeconds: proxySpan() }) },
+                    }),
+                    h('span', { className: 'fc-clip-t' }, '秒'),
+                    h('button', {
+                      className: 'fc-fold', type: 'button', title: '从头预览整段（最长 ' + PROXY_MAX + ' 秒）',
+                      onClick: edProxyWholeClip,
+                    }, '整段'),
                     h(Btn, { disabled: busy || s.proxyLoading, onClick: edMakeProxy }, s.proxyLoading ? '导出中…' : '生成预览片段'),
                     s.proxyUrl ? h(Btn, {
                       onClick: function () { dropUrl(ed.proxyUrl); edSet({ proxy: null, proxyUrl: '' }) },
@@ -741,8 +771,8 @@ window.__ModuleLoader__.load({
                   s.proxyError ? h('div', { className: 'fc-toast err' }, s.proxyError) : null,
                   s.prevOpen ? h('div', { className: 'fc-hint' },
                     '画面是套过调色的成片效果。拖动时间轴看任意一帧；',
-                    '「生成预览片段」渲染真实视频，约 0.13 秒/帧（' + s.proxySeconds + ' 秒 ≈ ' +
-                    Math.max(1, Math.round(s.proxySeconds * 50 * 0.13)) + ' 秒），结果会缓存。') : null),
+                    '「生成预览片段」渲染真实视频，长度自己填（0.5–' + PROXY_MAX + ' 秒），约 0.13 秒/帧（' +
+                    proxySpan() + ' 秒 ≈ ' + Math.max(1, Math.round(proxySpan() * 50 * 0.13)) + ' 秒），结果会缓存。') : null),
       
                 h('div', { className: 'fc-sec' },
                   h('div', { className: 'fc-sec-h' },

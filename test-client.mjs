@@ -340,6 +340,51 @@ console.log('\n── 预览 ──')
   check(span > 0 && span <= 3.01, '片段时长 ≤ 3 秒（' + span.toFixed(2) + 's）')
   check(findNodes(tree, 'fc-prev-v').length === 1, '出现 <video> 播放器')
 
+  console.log('\n── 自定义长度 ──')
+  {
+    // A fixed 2/3/5/10 menu never fits — the useful length is "this much of this
+    // clip". Pin the selection so the span maths below does not depend on what
+    // the previous section happened to leave selected.
+    const rows = findNodes(tree, 'fc-clip').filter(n => textOf(n).join('').indexOf('0332_D') >= 0)
+    rows[0].props.onClick()
+    await new Promise(r => setTimeout(r, 150))
+    tree = attempt('重渲染', () => paint('选中 0332_D'))
+
+    check(findNodes(tree, 'fc-num').length === 1, '视频长度是可填的输入框')
+    check(findNodes(tree, 'fc-num')[0].props.type === 'number', '是 number 输入框')
+    check(findNodes(tree, 'fc-num')[0].props.max === 20, '上限 20 秒（宿主只渲染到 20 秒）')
+
+    // 整段 fills in the clip's own duration and rewinds, so the whole clip is shown.
+    findClickable(tree, '整段')[0].props.onClick()
+    await new Promise(r => setTimeout(r, 150))
+    tree = attempt('重渲染', () => paint('整段'))
+    const whole = Number(findNodes(tree, 'fc-num')[0].props.value)
+    check(whole > 9 && whole <= 9.5, '「整段」填入片段时长 9.46s → ' + whole)
+    check(Number(findNodes(tree, 'fc-range')[0].props.value) === 0, '「整段」把时间轴归零')
+
+    // Whatever the user types is what actually gets rendered.
+    const before = proxyCalls.length
+    const num = findNodes(tree, 'fc-num')[0]
+    num.props.onChange({ target: { value: '7.5' } })
+    num.props.onBlur()
+    await new Promise(r => setTimeout(r, 40))
+    tree = attempt('重渲染', () => paint('填 7.5 秒'))
+    findClickable(tree, '生成预览片段')[0].props.onClick()
+    await new Promise(r => setTimeout(r, 150))
+    const last = proxyCalls[proxyCalls.length - 1]
+    check(proxyCalls.length > before, '自定义长度也会请求 /proxy')
+    check(Math.abs((last.end - last.start) - 7.5) < 0.02,
+      '按填的 7.5 秒请求（' + (last.end - last.start).toFixed(2) + 's）')
+
+    // The host rejects anything past its own cap, so clamp here, not there.
+    const n2 = findNodes(tree, 'fc-num')[0]
+    n2.props.onChange({ target: { value: '999' } })
+    n2.props.onBlur()
+    await new Promise(r => setTimeout(r, 40))
+    tree = attempt('重渲染', () => paint('夹紧后'))
+    check(String(findNodes(tree, 'fc-num')[0].props.value) === '20', '超过 20 秒被夹到 20')
+  }
+
   console.log('\n── 切换片段 ──')
   const rows2 = findNodes(tree, 'fc-clip').filter(n => textOf(n).join('').indexOf('0332_D') >= 0)
   const beforeSel = frameCalls.length
