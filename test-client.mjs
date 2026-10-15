@@ -14,6 +14,9 @@ let hookIndex = 0
 let effectQueue = []
 let dirty = false                // did any setter actually change a value?
 
+// The panel measures its own top to cap its height, so stand-in boxes need a
+// getBoundingClientRect(). `mockTop` is where the panel starts in the viewport.
+let mockTop = 210
 function createElement(type, props, ...children) {
   const flat = []
   const push = (c) => {
@@ -22,7 +25,20 @@ function createElement(type, props, ...children) {
     flat.push(c)
   }
   for (const c of children) push(c)
-  return { type, props: props || {}, children: flat }
+  const node = { type, props: props || {}, children: flat }
+  if (typeof type === 'string') {
+    node.getBoundingClientRect = () => ({ top: mockTop, left: 0, width: 400, height: 300 })
+  }
+  // React attaches an object ref during commit, after the element exists; the
+  // panel's measuring effect reads ref.current, so without this it stays null.
+  // Non-enumerable, or node -> props.ref -> current -> node makes JSON.stringify
+  // (used by the tree-dump assertions) throw on a circular structure.
+  const r = node.props.ref
+  if (r !== null && typeof r === 'object' && 'current' in r) {
+    r.current = node
+    Object.defineProperty(node.props, 'ref', { value: r, enumerable: false, writable: true, configurable: true })
+  }
+  return node
 }
 
 const React = {
@@ -49,13 +65,26 @@ const React = {
     if (!slot.ran) { slot.ran = true; effectQueue.push(fn) }   // models [] deps
   },
   useMemo(fn) { return fn() },
-  useRef(v) { return { current: v } },
+  // Real useRef hands back the SAME object on every render; a fresh one per
+  // render would detach the DOM node from the effect that measures it.
+  useRef(v) {
+    const slots = hooksByOwner.get(hookOwner)
+    const i = hookIndex++
+    const slot = slots[i] || (slots[i] = { value: { current: v } })
+    return slot.value
+  },
 }
 
 // ── mock module loader + DOM + fetch ────────────────────────────────────────
 let loaded = null
 const styleTags = []
-globalThis.window = { __ModuleLoader__: { load(def) { loaded = def } } }
+const winListeners = {}
+globalThis.window = {
+  __ModuleLoader__: { load(def) { loaded = def } },
+  innerHeight: 1000,
+  addEventListener(k, fn) { winListeners[k] = fn },
+  removeEventListener(k) { delete winListeners[k] },
+}
 globalThis.document = {
   createElement() { return { setAttribute() { }, remove() { }, set textContent(v) { styleTags.push(v) }, get textContent() { return '' } } },
   head: { appendChild() { } },
@@ -363,6 +392,32 @@ console.log('\n── 预览不能撑爆面板 ──')
   await new Promise(r => setTimeout(r, 60))
   tree = attempt('重渲染', () => paint('再展开'))
   check(findNodes(tree, 'fc-prev').length === 1, '可以再展开')
+}
+
+console.log('\n── 面板自己管滚动 ──')
+{
+  // The host's pane body does not scroll on its own, so the panel caps itself at
+  // the remaining viewport and scrolls inside — otherwise the last sections
+  // (「导出」) sit below the window and cannot be reached.
+  tree = attempt('重渲染', () => paint('测量后'))
+  let st = findNodes(tree, 'fc-wrap')[0].props.style
+  check(!!st && st.overflowY === 'auto', '面板容器可纵向滚动')
+  check(!!st && st.maxHeight === '780px',
+    '高度 = 视口 1000 − 起点 210 − 10 = 780px（实际 ' + (st && st.maxHeight) + '）')
+
+  // The pane's top moves when the header or the sidebar changes size; a stale
+  // cap would either cut content off or leave a dead strip.
+  mockTop = 100
+  winListeners.resize()
+  await new Promise(r => setTimeout(r, 40))
+  tree = attempt('重渲染', () => paint('布局变化后'))
+  st = findNodes(tree, 'fc-wrap')[0].props.style
+  check(!!st && st.maxHeight === '890px', '布局变化后重新测量（实际 ' + (st && st.maxHeight) + '）')
+
+  mockTop = 210
+  winListeners.resize()
+  await new Promise(r => setTimeout(r, 40))
+  tree = attempt('重渲染', () => paint('复位'))
 }
 
 console.log('\n── 点击「进度」标签（回归：这一击曾经失效）──')

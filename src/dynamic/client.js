@@ -886,15 +886,59 @@ return {
     }
 
     // ── top-level panel: progress view / editor, one docked tab ──────────────
+    // The host's sidebar pane body does not scroll on its own, so the panel caps
+    // itself at what is left of the viewport and scrolls inside. Without this the
+    // last sections (「导出」) sit below the window and are unreachable — reported
+    // from a screenshot where 导出 was cut off at the bottom edge.
+    // Measuring beats a magic offset: the pane's top moves with the app header,
+    // the tab strip and any resize of the sidebar.
+    function usePanelFill(ref) {
+      const pair = React.useState(0)
+      const setH = pair[1]
+      React.useEffect(function () {
+        let last = -1
+        function measure() {
+          const el = ref.current
+          if (el === null || el === undefined) return
+          if (typeof el.getBoundingClientRect !== 'function') return
+          const viewport = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 0
+          if (!viewport) return
+          const top = el.getBoundingClientRect().top
+          const h = Math.max(220, Math.round(viewport - top - 10))
+          // Guard the setter: an unchanged value would re-render forever once a
+          // ResizeObserver is watching the element we are resizing.
+          if (h !== last) { last = h; setH(h) }
+        }
+        measure()
+        if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('resize', measure)
+        let ro = null
+        if (typeof ResizeObserver !== 'undefined' && ref.current) {
+          ro = new ResizeObserver(measure)
+          ro.observe(ref.current)
+        }
+        return function () {
+          if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('resize', measure)
+          if (ro !== null) ro.disconnect()
+        }
+      }, [])
+      return pair[0]
+    }
+
     function Panel(props) {
       const wide = !!(props && props.wide)
       const s = useEditor()
+      const wrapRef = React.useRef(null)
+      const fillH = usePanelFill(wrapRef)
       const wrap = 'fc-wrap' + (wide ? ' wide' : '')
       function pick(view) {
         edSet({ view: view })
         if (view === 'edit' && ed.project === null && ed.projects.length === 0) edProjects()
       }
-      return h('div', { className: 'fc-root' }, h('div', { className: wrap },
+      return h('div', { className: 'fc-root' }, h('div', {
+        className: wrap,
+        ref: wrapRef,
+        style: fillH > 0 ? { maxHeight: fillH + 'px', overflowY: 'auto' } : null,
+      },
         h('div', { className: 'fc-tabs' },
           h('button', {
             className: 'fc-tab' + (s.view === 'progress' ? ' on' : ''), type: 'button',
