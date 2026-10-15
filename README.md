@@ -10,7 +10,8 @@ DSH 面板插件：**实时查看 FilmCraft 视频剪辑 / 调色的进度，并
 
 - **进度** —— 导出百分比、已用时、预计剩余、写入速度、输出大小、片段表、调色参数。
   数据来自本地文件采样，不占用剪辑进程。
-- **剪辑** —— 打开 `.fcproj` 工程，裁头/裁尾、删除、上下移、套调色、撤销、导出。
+- **剪辑** —— 打开 `.fcproj` 工程，**看画面**（单帧预览 / 缩略图 / 预览片段），
+  裁头/裁尾、删除、上下移、套调色、撤销、导出。
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -41,6 +42,30 @@ DSH 面板插件：**实时查看 FilmCraft 视频剪辑 / 调色的进度，并
 ## 剪辑页
 
 右侧栏面板的第二个标签，用来处理「基本问题」：
+
+### 预览画面
+
+盲剪没有意义，所以剪辑页会显示**调色之后**的画面：
+
+| 位置 | 内容 |
+|---|---|
+| **主预览** | 选中片段后自动渲染该片段中点的一帧，`4:3` 画框（源片就是 3840×2880） |
+| **时间轴** | 滑块拖到片段内任意位置看那一帧（420 ms 防抖），`◀ ▶` 每次 0.5 秒 |
+| **缩略图** | 片段列表每行一张，后台**一次渲染一张**慢慢补，不阻塞面板 |
+| **预览片段** | 导出 2/3/5/10 秒的真实视频，`<video controls loop>` 播放，可拖进度条 |
+
+渲染走 `filmcraft-cli render`（单帧）和 `export --format h264 --no-audio`（片段），
+结果按**工程 mtime** 缓存到磁盘：同一帧第二次是毫秒级，改了工程则自动失效。
+
+> **代价**：单帧是解码+调色决定的，和 `--scale` 几乎无关（实测 0.3–1.8 秒/帧，
+> 取决于源文件是否还在系统缓存里）；预览片段约 0.13 秒/帧。所以缩略图必须排队慢慢来 ——
+> 33 段一起发就是 45 秒的突发。拖动时间轴时新请求会**合并成只保留最新**，
+> 否则每个中间位置都要排一次 1 秒多的渲染。
+
+> **为什么串行**：`filmcraft-cli` 一次调用一个进程，而并发跑同一工程之前产出过损坏
+> 文件。host 侧对预览工作加了锁。
+
+### 剪辑操作
 
 | 操作 | 说明 |
 |---|---|
@@ -183,7 +208,7 @@ node tools/publish.cjs show
 { "ok": true, "percent": 51.3, "etaText": "46:40", "mode": "batch", "shots": [ ... ] }
 ```
 
-**`filmcraft_edit`** —— 基础剪辑，`action` 取 `projects` / `open` / `apply` / `undo` / `export`：
+**`filmcraft_edit`** —— 基础剪辑，`action` 取 `projects` / `open` / `apply` / `undo` / `export` / `frame` / `proxy`：
 
 ```jsonc
 // 看有哪些工程
@@ -200,6 +225,12 @@ node tools/publish.cjs show
 // 撤销 / 导出
 { "action": "undo", "project": "D:\\...\\final.fcproj" }
 { "action": "export", "project": "D:\\...\\final.fcproj", "out": "D:\\out.mp4", "start": 0, "end": 12 }
+
+// 看画面：渲染第 3 秒的一帧（返回 name，用 /media?name= 取二进制）
+{ "action": "frame", "project": "D:\\...\\final.fcproj", "seconds": 3, "scale": 0.25 }
+
+// 导出一段 3 秒预览视频
+{ "action": "proxy", "project": "D:\\...\\final.fcproj", "start": 10, "end": 13, "quality": 60 }
 ```
 
 `apply` 只接受白名单内的命令（剪辑与调色相关），不是 700 条命令的遥控器。
@@ -216,9 +247,16 @@ Host 注册了这些路由（面板走同一批）：
 | POST | `/dsh-filmcraft-progress/api/apply` | 执行编辑（白名单） |
 | POST | `/dsh-filmcraft-progress/api/undo` | 还原工程快照 |
 | POST | `/dsh-filmcraft-progress/api/export` | 后台导出 |
+| POST | `/dsh-filmcraft-progress/api/frame` | 渲染一帧画面（PNG） |
+| POST | `/dsh-filmcraft-progress/api/proxy` | 导出短预览片段（MP4） |
+| GET | `/dsh-filmcraft-progress/api/media?name=<文件>` | 二进制回读画面/视频，支持 Range |
+
+`/media` 只接受**纯文件名**（`^[A-Za-z0-9_.-]{1,80}$`，不含分隔符），从预览目录里读；
+路径穿越、绝对路径一律 400，文件不存在 404。`<video>` 拖动进度条依赖它返回 206。
 
 可用环境变量覆盖：`FILMCRAFT_CLI`（CLI 路径）、`FILMCRAFT_ROOTS`（扫描根目录，`;` 分隔）、
-`FILMCRAFT_EXPORT_DIR`、`FILMCRAFT_LOG_DIR`、`FILMCRAFT_PROGRESS_FILE`。
+`FILMCRAFT_EXPORT_DIR`、`FILMCRAFT_LOG_DIR`、`FILMCRAFT_PROGRESS_FILE`、
+`FILMCRAFT_PREVIEW_DIR`（预览缓存目录，默认 `<LOG_DIR>\preview`，保留最近 120 个文件）。
 
 ## 设计要点
 
@@ -231,6 +269,13 @@ Host 注册了这些路由（面板走同一批）：
 - **`running` 判定**：输出文件 30 秒内被写过即视为运行中；完成后自动转「已完成」。
 - **主进程/客户端分离**：Host 注册 HTTP 路由 `/dsh-filmcraft-progress/api/state`，
   Client 用 `slots` 挂 UI —— 和 `dsh-agent-ssh-dashboard` 同一套模式。
+- **二进制走 `raw` 路由**：画面/视频以二进制从 `/media` 返回，不是 base64 塞进 JSON。
+  `scripts/build-native.mjs` 的 `ROUTES` 表每项是 `[key, method, path, kind]`，
+  `kind` 取 `json` 或 `raw`；`raw` 路由原样拿到 `(req, res)` 自己写响应。
+  注意 `harness.handle` 不能把 raw 路由也包成 `(body) => handler(body || {})` ——
+  那样 `res` 会是 `undefined`（0.2.2 踩过，`/media` 直接 500）。
+- **预览缓存的键是「工程 mtime + 时间点 + 缩放」**：不引入文件监听，
+  改了工程 mtime 自然变化，旧帧自动不可达，再由 `prunePreview()` 保留最近 120 个。
 
 ## 重新构建
 
@@ -253,7 +298,11 @@ Host 侧由构建脚本注入 `node:fs` 导入和 HTTP 路由外壳；Client 侧
 | 速度一直 `—` | 只轮询过一次，等一轮 |
 | 任务已完成但显示「导出中」 | 输出文件仍在被写；30 秒无写入会自动转「已完成」 |
 | **分镜表是空的/只剩细横条** | `.fc-shot` 缺 `flex-shrink: 0`，被纵向 flex 容器压扁（0.2.0 已修） |
+| **预览区一直「渲染中…」** | 源文件不在系统缓存里时单帧要 1–2 秒；连续失败看是不是 `FILMCRAFT_CLI` 路径不对 |
+| **缩略图显示 `×`** | 该帧渲染失败，鼠标悬停片段行看 title；多半是源文件被移动或删除 |
+| **预览视频拖不动进度条** | `/media` 的 Range 支持被破坏（0.2.2 起支持 206） |
 | **「剪辑」页报「unsupported call」或 404** | Host 侧改了路由，**必须重启 DSH**（宿主进程内加载，刷新页面不够） |
+| **编辑后画面还是旧的** | 缓存键含工程 mtime，若工程被外部程序改写而 mtime 未变，等 1 秒再刷新 |
 
 > **改了 `src/dynamic/host.js` 之后要重启 DSH**：host 插件在宿主进程内被 import，
 > 没有热重载 API，`patchReload: live` 也不会重新 import 模块。改 client 侧刷新页面即可。

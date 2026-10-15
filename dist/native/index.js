@@ -73,19 +73,20 @@ function createPlugin(harness) {
         }
   
         const ex = st.export || {}
+        // ex.path may be a directory (a paused batch run points at its output
+        // folder). statSync reports a size for directories too, which would
+        // masquerade as a real, recently-written export file.
         let bytes = 0, mtimeMs = 0, exists = false
         if (ex.path) {
           try {
-            if (existsSync(ex.path)) {
-              const s = statSync(ex.path)
-              bytes = s.size
-              mtimeMs = s.mtimeMs
-              exists = true
-            }
+            const s = statSync(ex.path)
+            if (s.isFile()) { bytes = s.size; mtimeMs = s.mtimeMs; exists = true }
           } catch (_) { }
         }
   
-        if (exists) {
+        const alive = exists && mtimeMs > 0 && (now - mtimeMs) < ALIVE_WINDOW_MS
+  
+        if (alive) {
           HISTORY.push({ t: now, bytes: bytes })
           while (HISTORY.length > 60) HISTORY.shift()
         }
@@ -102,27 +103,41 @@ function createPlugin(harness) {
         const expectedBytes = num(ex.expectedBytes, num(st.expectedBytes, 0))
         const expectedMs = num(st.expectedMs, 0)
         const startedAt = st.startedAt ? Date.parse(st.startedAt) : null
-        const elapsedMs = startedAt !== null && Number.isFinite(startedAt) ? now - startedAt : null
+        // `num` treats null as 0, so test the type explicitly.
+        const frozenMs = typeof st.elapsedMs === 'number' && Number.isFinite(st.elapsedMs) ? st.elapsedMs : null
+        // A paused job must stop accruing. Leaving elapsed on the wall clock makes
+        // it grow past expectedMs and pins the bar at 99.9% forever — the "已暂停
+        // 0/33" + 99.9% contradiction.
+        const elapsedMs = alive
+          ? (startedAt !== null && Number.isFinite(startedAt) ? now - startedAt : null)
+          : frozenMs
   
         // progress: prefer byte ratio when the target size is known
         let percent = null, basis = null
-        if (expectedBytes > 0 && bytes > 0) {
-          percent = clamp((bytes / expectedBytes) * 100, 0, 99.9)
-          basis = 'bytes'
-        } else if (expectedMs > 0 && elapsedMs !== null && elapsedMs > 0) {
-          percent = clamp((elapsedMs / expectedMs) * 100, 0, 99.9)
-          basis = 'time'
+        if (alive) {
+          if (expectedBytes > 0 && bytes > 0) {
+            percent = clamp((bytes / expectedBytes) * 100, 0, 99.9)
+            basis = 'bytes'
+          } else if (expectedMs > 0 && elapsedMs !== null && elapsedMs > 0) {
+            percent = clamp((elapsedMs / expectedMs) * 100, 0, 99.9)
+            basis = 'time'
+          }
+        } else {
+          // Not running: report what the status file recorded, never a live guess.
+          const recorded = typeof st.percent === 'number' && Number.isFinite(st.percent) ? st.percent : null
+          if (recorded !== null) { percent = clamp(recorded, 0, 100); basis = 'recorded' }
         }
   
         let etaMs = null
-        if (rate > 0 && expectedBytes > 0 && bytes > 0) {
-          etaMs = ((expectedBytes - bytes) / rate) * 1000
-        } else if (expectedMs > 0 && elapsedMs !== null) {
-          etaMs = expectedMs - elapsedMs
+        if (alive) {
+          if (rate > 0 && expectedBytes > 0 && bytes > 0) {
+            etaMs = ((expectedBytes - bytes) / rate) * 1000
+          } else if (expectedMs > 0 && elapsedMs !== null) {
+            etaMs = expectedMs - elapsedMs
+          }
+          if (etaMs !== null) etaMs = Math.max(0, etaMs)
         }
-        if (etaMs !== null) etaMs = Math.max(0, etaMs)
   
-        const alive = exists && mtimeMs > 0 && (now - mtimeMs) < ALIVE_WINDOW_MS
         let phase = st.phase || 'idle'
         if (phase === 'export' && !alive && percent !== null && percent >= 99) phase = 'done'
   
@@ -419,23 +434,201 @@ function createPlugin(harness) {
         return { ok: true, pid: child.pid, out, log, args: args.slice(1) }
       }
   
+      // ── 3. preview ──────────────────────────────────────────────────────────
+      // `render` draws one graded Program frame to a still; `export` writes a
+      // short proxy clip.  Both are decode-bound (≈1.2 s per frame, almost
+      // independent of --scale), so results are cached on disk and keyed by the
+      // project's mtime: edit the project and every key changes.
+      const PREVIEW_DIR = (typeof process !== 'undefined' && process.env && process.env.FILMCRAFT_PREVIEW_DIR)
+        ? process.env.FILMCRAFT_PREVIEW_DIR
+        : LOG_DIR + '\\preview'
+      const PREVIEW_KEEP = 120
+      const PROXY_MAX_SECONDS = 20
+  
+      function previewDir() {
+        if (!existsSync(PREVIEW_DIR)) { try { mkdirSync(PREVIEW_DIR, { recursive: true }) } catch (_) { } }
+        return PREVIEW_DIR
+      }
+  
+      // FNV-1a twice with different seeds; good enough to name cache files and
+      // avoids pulling node:crypto into the injected import list.
+      function cacheKey(parts) {
+        const text = parts.join('|')
+        let a = 0x811c9dc5, b = 0x01000193
+        for (let i = 0; i < text.length; i++) {
+          const c = text.charCodeAt(i)
+          a = Math.imul(a ^ c, 16777619) >>> 0
+          b = Math.imul(b + c, 2246822519) >>> 0
+        }
+        return (a.toString(16) + b.toString(16)).padStart(16, '0')
+      }
+  
+      function mediaUrl(name) { return harness.apiBase + '/media?name=' + encodeURIComponent(name) }
+  
+      function projectMtime(p) {
+        try { return Math.round(statSync(p).mtimeMs) } catch (_) { return 0 }
+      }
+  
+      function clampScale(v, d) {
+        const n = Number(v)
+        if (!Number.isFinite(n) || n <= 0) return d
+        return Math.min(1, Math.max(0.05, n))
+      }
+  
+      function prunePreview() {
+        try {
+          const all = readdirSync(PREVIEW_DIR).filter(n => /\.(jpg|png|mp4)$/i.test(n))
+          if (all.length <= PREVIEW_KEEP) return
+          const stamped = all.map((n) => {
+            let t = 0
+            try { t = statSync(PREVIEW_DIR + '\\' + n).mtimeMs } catch (_) { }
+            return { n, t }
+          }).sort((x, y) => x.t - y.t)
+          for (const f of stamped.slice(0, stamped.length - PREVIEW_KEEP)) {
+            try { rmSync(PREVIEW_DIR + '\\' + f.n, { force: true }) } catch (_) { }
+          }
+        } catch (_) { }
+      }
+  
+      function renderFrame(body) {
+        const p = guardPath(body.project)
+        if (!existsSync(p)) throw new Error('工程不存在：' + p)
+        const seconds = Number(body.seconds)
+        if (!Number.isFinite(seconds) || seconds < 0) throw new Error('时间点无效')
+        const scale = clampScale(body.scale, 0.25)
+        const t = Math.round(seconds * 1000) / 1000
+        // `render` always writes PNG whatever the extension says, so name it
+        // honestly — declaring image/jpeg over PNG bytes is a lie the browser
+        // only tolerates because it sniffs.
+        const name = 'f_' + cacheKey([p, projectMtime(p), String(t), String(scale)]) + '.png'
+        const out = previewDir() + '\\' + name
+        if (existsSync(out)) {
+          return { ok: true, cached: true, name, url: mediaUrl(name), bytes: statSync(out).size, seconds: t, scale }
+        }
+        const t0 = Date.now()
+        const r = cli(['--project', p, 'render', '--seconds', String(t), '--out', out, '--scale', String(scale)], 180000)
+        if (!existsSync(out)) {
+          throw new Error('渲染失败：' + (r.err || r.out || '未知错误').trim().slice(0, 300))
+        }
+        prunePreview()
+        return { ok: true, cached: false, name, url: mediaUrl(name), bytes: statSync(out).size, seconds: t, scale, ms: Date.now() - t0 }
+      }
+  
+      function exportProxy(body) {
+        const p = guardPath(body.project)
+        if (!existsSync(p)) throw new Error('工程不存在：' + p)
+        const start = Number(body.start)
+        const end = Number(body.end)
+        if (!Number.isFinite(start) || start < 0) throw new Error('起始时间无效')
+        if (!Number.isFinite(end) || end <= start) throw new Error('结束时间必须晚于起始时间')
+        if (end - start > PROXY_MAX_SECONDS) throw new Error('预览片段最长 ' + PROXY_MAX_SECONDS + ' 秒')
+        const scale = clampScale(body.scale, 0.25)
+        const quality = Math.min(90, Math.max(20, Number(body.quality) || 60))
+        const name = 'p_' + cacheKey([p, projectMtime(p), start.toFixed(3), end.toFixed(3), String(scale), String(quality)]) + '.mp4'
+        const out = previewDir() + '\\' + name
+        if (existsSync(out)) {
+          return { ok: true, cached: true, name, url: mediaUrl(name), bytes: statSync(out).size, seconds: end - start }
+        }
+        const t0 = Date.now()
+        const r = cli(['--project', p, 'export', out, '--format', 'h264',
+          '--start', String(start), '--end', String(end),
+          '--scale', String(scale), '--quality', String(quality), '--no-audio'], 600000)
+        if (!existsSync(out)) {
+          throw new Error('导出失败：' + (r.err || r.out || '未知错误').trim().slice(0, 300))
+        }
+        prunePreview()
+        return { ok: true, cached: false, name, url: mediaUrl(name), bytes: statSync(out).size, seconds: end - start, ms: Date.now() - t0 }
+      }
+  
+      // Binary read for <img>/<video>.  Only basenames inside PREVIEW_DIR are
+      // reachable — no separators, no traversal — and Range is honoured so the
+      // browser can seek the proxy clip.
+      function serveMedia(req, res) {
+        const raw = String(req.url || '')
+        const q = raw.indexOf('?')
+        const params = new URLSearchParams(q >= 0 ? raw.slice(q + 1) : '')
+        const name = params.get('name') || ''
+        if (!/^[A-Za-z0-9_.-]{1,80}$/.test(name) || name.indexOf('..') >= 0) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          return res.end(JSON.stringify({ error: '文件名非法' }))
+        }
+        const full = previewDir() + '\\' + name
+        let size = 0
+        try {
+          const s = statSync(full)
+          if (!s.isFile()) throw new Error('not a file')
+          size = s.size
+        } catch (_) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
+          return res.end(JSON.stringify({ error: '文件不存在' }))
+        }
+        const type = /\.mp4$/i.test(name) ? 'video/mp4' : (/\.png$/i.test(name) ? 'image/png' : 'image/jpeg')
+        const range = req.headers ? req.headers.range : null
+        const m = typeof range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null
+        if (m !== null) {
+          let from = m[1] === '' ? null : Number(m[1])
+          let to = m[2] === '' ? null : Number(m[2])
+          if (from === null && to !== null) { from = Math.max(0, size - to); to = size - 1 }
+          if (from === null) from = 0
+          if (to === null || to >= size) to = size - 1
+          if (from > to || from >= size) {
+            res.writeHead(416, { 'content-range': 'bytes */' + size })
+            return res.end()
+          }
+          const buf = readFileSync(full).subarray(from, to + 1)
+          res.writeHead(206, {
+            'content-type': type,
+            'content-length': String(buf.length),
+            'content-range': 'bytes ' + from + '-' + to + '/' + size,
+            'accept-ranges': 'bytes',
+            'cache-control': 'private, max-age=600',
+          })
+          return res.end(buf)
+        }
+        const buf = readFileSync(full)
+        res.writeHead(200, {
+          'content-type': type,
+          'content-length': String(buf.length),
+          'accept-ranges': 'bytes',
+          'cache-control': 'private, max-age=600',
+        })
+        res.end(buf)
+      }
+  
+      // filmcraft-cli is one process per call, and concurrent runs against the
+      // same project have produced corrupt output before.  The panel opens a
+      // project and immediately wants both a thumbnail strip and a preview, so
+      // preview work is serialised here rather than trusting callers to be polite.
+      let previewChain = Promise.resolve()
+      function previewLock(fn) {
+        const run = previewChain.then(fn, fn)
+        previewChain = run.then(() => { }, () => { })
+        return run
+      }
+  
       harness.handle('edit.projects', () => ({ ok: true, roots: ROOTS, exportDir: EXPORT_DIR, projects: scanProjects() }))
       harness.handle('edit.open', (body) => openProject(body.path))
       harness.handle('edit.apply', (body) => applyEdits(body.project, body.commands, body.save))
       harness.handle('edit.undo', (body) => restoreSnapshot(guardPath(body.project)))
       harness.handle('edit.export', (body) => startExport(body))
+      harness.handle('edit.frame', (body) => previewLock(() => renderFrame(body)))
+      harness.handle('edit.proxy', (body) => previewLock(() => exportProxy(body)))
+      harness.handle('edit.media', (req, res) => serveMedia(req, res))
   
       harness.registerTool(ctx, harness.defineTool({
         name: 'filmcraft_edit',
-        description: '对 FilmCraft 工程做基础剪辑：列出/打开工程、查看片段、修剪入出点、删除、移动、套调色、撤销、导出。action=projects|open|apply|undo|export。',
+        description: '对 FilmCraft 工程做基础剪辑：列出/打开工程、查看片段、修剪入出点、删除、移动、套调色、撤销、导出。action=projects|open|apply|undo|export|frame|proxy。frame/proxy 会把画面渲染成文件，供预览。',
         parameters: {
-          action: { type: 'string', description: 'projects=列出工程, open=打开并查看片段, apply=执行编辑, undo=撤销上一次编辑, export=导出', required: true },
-          project: { type: 'string', description: 'open/apply/export：.fcproj 工程路径' },
+          action: { type: 'string', description: 'projects=列出工程, open=打开并查看片段, apply=执行编辑, undo=撤销上一次编辑, export=导出, frame=渲染一帧画面, proxy=导出短预览片段', required: true },
+          project: { type: 'string', description: 'open/apply/export/frame/proxy：.fcproj 工程路径' },
           commands: { type: 'array', description: 'apply：[{id,params}] 形式的命令，仅限白名单（timeline.trim / edit.rippleDelete / timeline.move / effects.setParam 等）', items: { type: 'object', additionalProperties: true } },
           out: { type: 'string', description: 'export：输出文件路径' },
-          start: { type: 'number', description: 'export：起始秒' },
-          end: { type: 'number', description: 'export：结束秒' },
+          start: { type: 'number', description: 'export/proxy：起始秒' },
+          end: { type: 'number', description: 'export/proxy：结束秒' },
           preset: { type: 'string', description: 'export：导出预设名' },
+          seconds: { type: 'number', description: 'frame：渲染哪一秒的画面（时间轴秒数）' },
+          scale: { type: 'number', description: 'frame/proxy：缩放比例，0.05–1，默认 0.25' },
+          quality: { type: 'number', description: 'proxy：H.264 质量 20–90，默认 60' },
         },
         output: {
           schema: { type: 'object', additionalProperties: true },
@@ -448,7 +641,9 @@ function createPlugin(harness) {
           if (action === 'apply') return applyEdits(args.project, args.commands, true)
           if (action === 'undo') return restoreSnapshot(guardPath(args.project))
           if (action === 'export') return startExport(args)
-          throw new Error('action 必须是 projects|open|apply|undo|export')
+          if (action === 'frame') return renderFrame(args)
+          if (action === 'proxy') return exportProxy(args)
+          throw new Error('action 必须是 projects|open|apply|undo|export|frame|proxy')
         },
       }))
     },
@@ -479,6 +674,15 @@ function registerRoute(ctx, route, handler, label) {
     kind: 'exact',
     path: route.path,
     async handler(req, res) {
+      if (route.kind === 'raw') {
+        try { return await handler(req, res) } catch (error) {
+          try {
+            res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+          } catch (_) { }
+          return
+        }
+      }
       const send = (code, value) => {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify(value))
@@ -496,22 +700,31 @@ function registerRoute(ctx, route, handler, label) {
 
 export function apply(ctx) {
   const routes = {
-      'progress.state': { method: 'GET', path: '/dsh-filmcraft-progress/api/state' },
-      'edit.projects': { method: 'GET', path: '/dsh-filmcraft-progress/api/projects' },
-      'edit.open': { method: 'POST', path: '/dsh-filmcraft-progress/api/open' },
-      'edit.apply': { method: 'POST', path: '/dsh-filmcraft-progress/api/apply' },
-      'edit.undo': { method: 'POST', path: '/dsh-filmcraft-progress/api/undo' },
-      'edit.export': { method: 'POST', path: '/dsh-filmcraft-progress/api/export' },
+      'progress.state': { method: 'GET', path: '/dsh-filmcraft-progress/api/state', kind: 'json' },
+      'edit.projects': { method: 'GET', path: '/dsh-filmcraft-progress/api/projects', kind: 'json' },
+      'edit.open': { method: 'POST', path: '/dsh-filmcraft-progress/api/open', kind: 'json' },
+      'edit.apply': { method: 'POST', path: '/dsh-filmcraft-progress/api/apply', kind: 'json' },
+      'edit.undo': { method: 'POST', path: '/dsh-filmcraft-progress/api/undo', kind: 'json' },
+      'edit.export': { method: 'POST', path: '/dsh-filmcraft-progress/api/export', kind: 'json' },
+      'edit.frame': { method: 'POST', path: '/dsh-filmcraft-progress/api/frame', kind: 'json' },
+      'edit.proxy': { method: 'POST', path: '/dsh-filmcraft-progress/api/proxy', kind: 'json' },
+      'edit.media': { method: 'GET', path: '/dsh-filmcraft-progress/api/media', kind: 'raw' },
     }
   const harness = {
     defineTool,
+    apiBase: '/dsh-filmcraft-progress/api',
     registerTool(_context, tool) {
       return ctx.effect(() => ctx.tools.register(tool), 'dsh-filmcraft-progress: tool ' + tool.name)
     },
     handle(key, handler) {
       const route = routes[key]
       if (route === undefined) throw new Error('unsupported handler: ' + key)
-      return registerRoute(ctx, route, (body) => handler(body || {}), 'dsh-filmcraft-progress: ' + key)
+      const label = 'dsh-filmcraft-progress: ' + key
+      // Raw routes write the response themselves and need (req, res); JSON
+      // routes only ever get the parsed body.  Wrapping the raw ones in
+      // (body) => handler(body || {}) would hand them res === undefined.
+      if (route.kind === 'raw') return registerRoute(ctx, route, handler, label)
+      return registerRoute(ctx, route, (body) => handler(body || {}), label)
     },
   }
   return createPlugin(harness).apply(ctx)

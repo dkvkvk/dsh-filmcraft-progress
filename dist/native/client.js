@@ -12,16 +12,34 @@ window.__ModuleLoader__.load({
         return function () { element.remove() }
       },
     }
-    var host = {
-      call: async function (name, arg) {
-        var routes = {
+    var routes = {
         'progress.state': ['GET', '/dsh-filmcraft-progress/api/state'],
         'edit.projects': ['GET', '/dsh-filmcraft-progress/api/projects'],
         'edit.open': ['POST', '/dsh-filmcraft-progress/api/open'],
         'edit.apply': ['POST', '/dsh-filmcraft-progress/api/apply'],
         'edit.undo': ['POST', '/dsh-filmcraft-progress/api/undo'],
         'edit.export': ['POST', '/dsh-filmcraft-progress/api/export'],
+        'edit.frame': ['POST', '/dsh-filmcraft-progress/api/frame'],
+        'edit.proxy': ['POST', '/dsh-filmcraft-progress/api/proxy'],
+        'edit.media': ['GET', '/dsh-filmcraft-progress/api/media'],
       }
+    var host = {
+      url: function (name, params) {
+        var route = routes[name]
+        if (route === undefined) throw new Error('unsupported call: ' + name)
+        var query = ''
+        if (params) {
+          var parts = []
+          for (var key in params) {
+            if (Object.prototype.hasOwnProperty.call(params, key) && params[key] !== undefined && params[key] !== null) {
+              parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]))
+            }
+          }
+          if (parts.length > 0) query = '?' + parts.join('&')
+        }
+        return route[1] + query
+      },
+      call: async function (name, arg) {
         var route = routes[name]
         if (route === undefined) throw new Error('unsupported call: ' + name)
         var init = { cache: 'no-store' }
@@ -34,6 +52,16 @@ window.__ModuleLoader__.load({
         var value = await response.json()
         if (!response.ok) throw new Error(value && value.error ? value.error : 'request failed')
         return value
+      },
+      blob: async function (name, params) {
+        var response = await fetch(host.url(name, params), { cache: "no-store" })
+        if (!response.ok) {
+          var text = await response.text()
+          var message = '请求失败 (' + response.status + ')'
+          try { var parsed = JSON.parse(text); if (parsed && parsed.error) message = parsed.error } catch (_) { }
+          throw new Error(message)
+        }
+        return await response.blob()
       },
     }
     function createPlugin() {
@@ -207,6 +235,15 @@ window.__ModuleLoader__.load({
               '.fc-clip-t{color:var(--dim);font-size:9px;flex:0 0 auto}',
               '.fc-g{width:6px;height:6px;border-radius:50%;background:var(--bar);flex:0 0 auto}',
               '.fc-g.none{background:var(--line)}',
+              // preview: the source clips are 3840x2880, so 4:3 matches their frame
+              '.fc-prev{position:relative;width:100%;aspect-ratio:4/3;background:#000;border:1px solid var(--line);border-radius:5px;overflow:hidden;display:flex;align-items:center;justify-content:center;margin-bottom:6px}',
+              '.fc-prev-i,.fc-prev-v{width:100%;height:100%;object-fit:contain;display:block}',
+              '.fc-prev-none{color:var(--dim);font-size:10px}',
+              '.fc-prev-ov{position:absolute;right:5px;top:5px;padding:2px 6px;border-radius:3px;background:rgba(0,0,0,.65);color:#fff;font-size:9px}',
+              '.fc-range{flex:1;min-width:0;height:16px;accent-color:var(--bar)}',
+              '.fc-thumb{width:34px;height:20px;flex:0 0 auto;object-fit:cover;border-radius:2px;background:var(--line);display:block}',
+              '.fc-thumb-ph{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:9px}',
+              '.fc-thumb-prog{color:var(--dim);font-size:9px;font-weight:400}',
               '.fc-toast{padding:6px 8px;border-left:3px solid var(--ok);background:var(--soft);margin:8px 0;font-size:10px;word-break:break-word}',
               '.fc-toast.err{border-left-color:var(--err);color:var(--err)}',
               '.fc-hint{color:var(--dim);font-size:9px;line-height:1.6;margin-top:6px}',
@@ -288,6 +325,11 @@ window.__ModuleLoader__.load({
             projects: [], project: null, selected: null,
             busy: false, toast: '', error: '',
             out: '', preset: PRESETS[0], pickOpen: false,
+            // preview: the still of the selected clip, the scrub position inside it,
+            // per-clip thumbnails, and the optional proxy clip.
+            frame: null, frameUrl: '', frameLoading: false, frameError: '',
+            scrub: 0, thumb: {}, proxy: null, proxyUrl: '', proxyLoading: false, proxyError: '',
+            proxySeconds: 3, thumbDone: 0, thumbTotal: 0,
             listeners: new Set(),
           }
           function edSet(patch) {
@@ -327,6 +369,160 @@ window.__ModuleLoader__.load({
             return dir + (kind === 'clip' && selClip() ? shortName(selClip().name) : stem) + '_调色.mp4'
           }
       
+          // ── preview: stills, thumbnails, short proxy clips ───────────────────────
+          // `render` costs ~1.2 s per frame (decode-bound, nearly independent of
+          // --scale), so the host caches every result by project mtime and the client
+          // keeps a monotonically increasing token: a slow frame arriving after a
+          // newer request is dropped instead of repainting over it.
+          let frameToken = 0
+          let scrubTimer = null
+          let thumbBusy = false
+          const thumbQueue = []
+      
+          function blobUrl(blob) {
+            if (typeof URL !== 'undefined' && URL.createObjectURL) return URL.createObjectURL(blob)
+            return ''
+          }
+          function dropUrl(u) {
+            if (!u) return
+            try { if (typeof URL !== 'undefined' && URL.revokeObjectURL) URL.revokeObjectURL(u) } catch (_) { }
+          }
+      
+          // Only one frame render runs at a time; requests arriving while it is in
+          // flight are coalesced down to the newest.  Without this, dragging the
+          // scrubber queues a 1.2 s render for every intermediate position.
+          let frameBusy = false
+          let framePending = null
+      
+          async function edLoadFrame(seconds) {
+            const p = ed.project
+            if (!p) return
+            if (frameBusy) { framePending = seconds; return }
+            frameBusy = true
+            try {
+              let want = seconds
+              while (want !== null) {
+                framePending = null
+                const token = ++frameToken
+                edSet({ frameLoading: true, frameError: '' })
+                try {
+                  const r = await host.call('edit.frame', { project: p.path, seconds: want, scale: 0.25 })
+                  const blob = await host.blob('edit.media', { name: r.name })
+                  if (token === frameToken) {
+                    const old = ed.frameUrl
+                    edSet({ frame: r, frameUrl: blobUrl(blob), frameLoading: false, frameError: '' })
+                    dropUrl(old)
+                  }
+                } catch (e) {
+                  if (token === frameToken) edSet({ frameLoading: false, frameError: errText(e) })
+                }
+                want = framePending
+              }
+            } finally {
+              frameBusy = false
+            }
+          }
+      
+          function edScrub(v) {
+            edSet({ scrub: v })
+            if (scrubTimer !== null) clearTimeout(scrubTimer)
+            // Debounced: dragging the slider must not queue one 1.2 s render per pixel.
+            scrubTimer = setTimeout(function () {
+              const c = selClip()
+              if (c === null) return
+              edLoadFrame(c.start + ed.scrub)
+            }, 420)
+          }
+      
+          function edSelectClip(c) {
+            dropUrl(ed.proxyUrl)
+            edSet({
+              selected: c.clip, out: '', scrub: c.dur / 2,
+              proxy: null, proxyUrl: '', proxyError: '', frameUrl: '', frame: null,
+            })
+            edLoadFrame(c.start + c.dur / 2)
+          }
+      
+          // Re-render the current still after the project changed.  The host keys its
+          // cache on the project's mtime, so an edit automatically misses the cache.
+          function edRefreshFrame() {
+            const c = selClip()
+            if (c === null) return
+            const t = Math.min(ed.scrub, Math.max(0, c.dur - 0.001))
+            edSet({ scrub: t })
+            edLoadFrame(c.start + t)
+            // Only the edited clip's thumbnail is stale — the others were not touched
+            // and re-rendering all 33 would cost ~45 s for nothing.  Drop the entry so
+            // the pump renders it again against the new mtime.
+            const key = ed.project.path + '#' + c.clip
+            delete ed.thumb[key]
+            let queued = false
+            for (const job of thumbQueue) if (job.key === key) queued = true
+            if (!queued) {
+              thumbQueue.push({ key: key, project: ed.project.path, seconds: c.start + c.dur / 2 })
+              ed.thumbTotal += 1
+            }
+            edSet({})
+            thumbPump()
+          }
+      
+          async function thumbPump() {
+            if (thumbBusy) return
+            thumbBusy = true
+            while (thumbQueue.length > 0) {
+              const job = thumbQueue.shift()
+              if (ed.thumb[job.key] && ed.thumb[job.key].state === 'ok') { ed.thumbDone += 1; continue }
+              ed.thumb[job.key] = { state: 'loading' }
+              edSet({})
+              try {
+                const r = await host.call('edit.frame', { project: job.project, seconds: job.seconds, scale: 0.1 })
+                const blob = await host.blob('edit.media', { name: r.name })
+                ed.thumb[job.key] = { state: 'ok', url: blobUrl(blob) }
+              } catch (e) {
+                ed.thumb[job.key] = { state: 'err', error: errText(e) }
+              }
+              ed.thumbDone += 1
+              edSet({})
+            }
+            thumbBusy = false
+          }
+      
+          // Thumbnails fill in one at a time in the background: 33 clips fired at once
+          // would be a ~45 s burst and the panel would look frozen.
+          function edQueueThumbs() {
+            const p = ed.project
+            if (!p) return
+            thumbQueue.length = 0
+            for (const c of p.clips) {
+              const key = p.path + '#' + c.clip
+              if (ed.thumb[key] && ed.thumb[key].state === 'ok') continue
+              thumbQueue.push({ key: key, project: p.path, seconds: c.start + c.dur / 2 })
+            }
+            ed.thumbDone = 0
+            ed.thumbTotal = thumbQueue.length
+            edSet({})
+            thumbPump()
+          }
+      
+          async function edMakeProxy() {
+            const p = ed.project
+            const c = selClip()
+            if (!p || c === null) return
+            const start = c.start + ed.scrub
+            const end = Math.min(c.start + c.dur, start + ed.proxySeconds)
+            if (end - start < 0.2) { edSet({ proxyError: '这个位置往后不足 0.2 秒，换个时间点再试' }); return }
+            edSet({ proxyLoading: true, proxyError: '', proxy: null })
+            try {
+              const r = await host.call('edit.proxy', { project: p.path, start: start, end: end, scale: 0.25, quality: 60 })
+              const blob = await host.blob('edit.media', { name: r.name })
+              const old = ed.proxyUrl
+              edSet({ proxy: r, proxyUrl: blobUrl(blob), proxyLoading: false, proxyError: '' })
+              dropUrl(old)
+            } catch (e) {
+              edSet({ proxyLoading: false, proxyError: errText(e) })
+            }
+          }
+      
           async function edProjects() {
             edSet({ busy: true, error: '', toast: '' })
             try {
@@ -335,13 +531,20 @@ window.__ModuleLoader__.load({
             } catch (e) { edSet({ busy: false, error: errText(e) }) }
           }
           async function edOpen(path) {
-            edSet({ busy: true, error: '', toast: '', pickOpen: false })
+            edSet({
+              busy: true, error: '', toast: '', pickOpen: false, selected: null,
+              frame: null, frameUrl: '', frameLoading: false, frameError: '',
+              proxy: null, proxyUrl: '', proxyError: '', thumb: {},
+            })
             try {
               const r = await host.call('edit.open', { path: path })
               edSet({
                 project: r, selected: r.clips.length ? r.clips[0].clip : null,
                 busy: false, out: '', toast: '已打开 ' + r.name + ' · ' + r.clipCount + ' 段 · ' + tc(r.duration),
               })
+              // Preview and thumbnails follow whatever project was just opened.
+              edQueueThumbs()
+              if (r.clips.length) edSelectClip(r.clips[0])
             } catch (e) { edSet({ busy: false, error: errText(e) }) }
           }
           async function edApply(commands, label) {
@@ -361,6 +564,7 @@ window.__ModuleLoader__.load({
                 toast: (r.ok ? '✅ ' : '⚠️ ') + label + ' · ' + r.applied + ' 步' +
                   (r.failed ? ' · 失败 ' + r.failed : '') + ' · 可撤销 ' + (r.undoDepth || 0) + ' 步',
               })
+              edRefreshFrame()
             } catch (e) { edSet({ busy: false, error: errText(e) }) }
           }
           async function edUndo() {
@@ -371,6 +575,7 @@ window.__ModuleLoader__.load({
               const r = await host.call('edit.undo', { project: p.path })
               const re = await host.call('edit.open', { path: p.path })
               edSet({ project: re, busy: false, toast: '↩ 已撤销，剩余 ' + (r.remaining || 0) + ' 步可撤销' })
+              edRefreshFrame()
             } catch (e) { edSet({ busy: false, error: errText(e) }) }
           }
           async function edExport(kind) {
@@ -472,17 +677,72 @@ window.__ModuleLoader__.load({
       
               p === null ? h('div', { className: 'fc-hint' },
                 '点「扫描」找出 D 盘里的 .fcproj 工程，选一个就能在这里剪。',
-                h('br'), '支持：裁头/裁尾、删除、上下移、套调色、启停用、撤销、导出。') : h('div', null,
+                h('br'), '支持：预览画面、裁头/裁尾、删除、上下移、套调色、启停用、撤销、导出。') : h('div', null,
       
                 h('div', { className: 'fc-sec' },
-                  h('div', { className: 'fc-sec-h' }, '片段 (' + p.clipCount + ') · ' + tc(p.duration)),
+                  h('div', { className: 'fc-sec-h' },
+                    '预览' + (clip === null ? '' : ' · #' + (p.clips.indexOf(clip) + 1) + ' ' + shortName(clip.name))),
+                  h('div', { className: 'fc-prev' },
+                    s.proxyUrl
+                      ? h('video', { className: 'fc-prev-v', src: s.proxyUrl, controls: true, autoPlay: true, loop: true, playsInline: true })
+                      : (s.frameUrl
+                        ? h('img', { className: 'fc-prev-i', src: s.frameUrl, alt: '预览画面' })
+                        : h('div', { className: 'fc-prev-none' },
+                          s.frameLoading ? '渲染中…' : (clip === null ? '选一个片段' : '准备中…'))),
+                    s.frameLoading && s.frameUrl ? h('div', { className: 'fc-prev-ov' }, '渲染中…') : null),
+      
+                  clip === null ? null : h('div', { className: 'fc-row' },
+                    h('span', { className: 'fc-lb' }, '时间'),
+                    h(Btn, {
+                      disabled: busy || s.frameLoading, title: '往前 0.5 秒',
+                      onClick: function () { edScrub(Math.max(0, s.scrub - 0.5)) },
+                    }, '◀'),
+                    h('input', {
+                      className: 'fc-range', type: 'range', min: 0, max: Math.max(0.001, clip.dur), step: 0.05,
+                      value: s.scrub, onChange: function (e) { edScrub(Number(e.target.value)) },
+                    }),
+                    h(Btn, {
+                      disabled: busy || s.frameLoading, title: '往后 0.5 秒',
+                      onClick: function () { edScrub(Math.min(clip.dur, s.scrub + 0.5)) },
+                    }, '▶'),
+                    h('span', { className: 'fc-clip-t' }, s.scrub.toFixed(2) + ' / ' + clip.dur.toFixed(2) + 's')),
+      
+                  clip === null ? null : h('div', { className: 'fc-row' },
+                    h('span', { className: 'fc-lb' }, '视频'),
+                    h('select', {
+                      className: 'fc-sel', value: String(s.proxySeconds),
+                      onChange: function (e) { edSet({ proxySeconds: Number(e.target.value) }) },
+                    }, [2, 3, 5, 10].map(function (n) { return h('option', { value: String(n), key: String(n) }, n + ' 秒') })),
+                    h(Btn, { disabled: busy || s.proxyLoading, onClick: edMakeProxy }, s.proxyLoading ? '导出中…' : '生成预览片段'),
+                    s.proxyUrl ? h(Btn, {
+                      onClick: function () { dropUrl(ed.proxyUrl); edSet({ proxy: null, proxyUrl: '' }) },
+                    }, '关闭视频') : null),
+      
+                  s.frameError ? h('div', { className: 'fc-toast err' }, s.frameError) : null,
+                  s.proxyError ? h('div', { className: 'fc-toast err' }, s.proxyError) : null,
+                  h('div', { className: 'fc-hint' },
+                    '画面是套过调色的成片效果。拖动时间轴看任意一帧；',
+                    '「生成预览片段」渲染真实视频，约 0.13 秒/帧（' + s.proxySeconds + ' 秒 ≈ ' +
+                    Math.max(1, Math.round(s.proxySeconds * 50 * 0.13)) + ' 秒），结果会缓存。')),
+      
+                h('div', { className: 'fc-sec' },
+                  h('div', { className: 'fc-sec-h' },
+                    '片段 (' + p.clipCount + ') · ' + tc(p.duration),
+                    s.thumbTotal > 0 && s.thumbDone < s.thumbTotal
+                      ? h('span', { className: 'fc-thumb-prog' }, ' · 缩略图 ' + s.thumbDone + '/' + s.thumbTotal)
+                      : null),
                   h('div', { className: 'fc-clips' }, p.clips.map(function (c, i) {
+                    const th = s.thumb[p.path + '#' + c.clip]
                     return h('div', {
                       className: 'fc-clip' + (c.clip === s.selected ? ' on' : ''), key: c.clip,
                       title: c.name + '\n时长 ' + c.dur.toFixed(2) + 's · 源入点 ' + c.sourceIn.toFixed(2) + 's' +
                         (c.grade ? '\n已调色：对比 ' + c.grade.contrast + ' / 饱和 ' + c.grade.saturation + ' / 色温 ' + c.grade.temperature : '\n未调色'),
-                      onClick: function () { edSet({ selected: c.clip, out: '' }) },
+                      onClick: function () { edSelectClip(c) },
                     },
+                      th && th.state === 'ok'
+                        ? h('img', { className: 'fc-thumb', src: th.url, alt: '' })
+                        : h('span', { className: 'fc-thumb fc-thumb-ph' },
+                          th && th.state === 'loading' ? '…' : (th && th.state === 'err' ? '×' : '')),
                       h('span', { className: 'fc-g' + (c.grade ? '' : ' none') }),
                       h('span', { className: 'fc-clip-n' }, '#' + (i + 1)),
                       h('span', { className: 'fc-clip-name', style: c.enabled ? null : { opacity: 0.45 } }, shortName(c.name)),

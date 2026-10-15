@@ -101,9 +101,23 @@ const STATE = {
 }
 
 const calls = []
+const frameCalls = []
+const proxyCalls = []
+let blobSeq = 0
+// The client turns fetched blobs into object URLs for <img>/<video>.
+globalThis.URL.createObjectURL = () => 'blob:mock/' + (++blobSeq)
+globalThis.URL.revokeObjectURL = () => { }
+
 globalThis.fetch = async (path, init) => {
   const body = init && init.body ? JSON.parse(init.body) : null
   calls.push({ path, method: (init && init.method) || 'GET', body })
+  // binary media read — the client uses host.blob(), not host.call()
+  if (path.indexOf('/media?') >= 0) {
+    if (path.indexOf('name=missing') >= 0) {
+      return { ok: false, status: 404, text: async () => JSON.stringify({ error: '文件不存在' }) }
+    }
+    return { ok: true, status: 200, blob: async () => ({ size: 2048, type: 'image/png' }) }
+  }
   let value
   if (path.endsWith('/state')) value = STATE
   else if (path.endsWith('/projects')) value = { ok: true, roots: ['D:\\Myfiles\\临时'], projects: [{ path: PROJECT.path, name: PROJECT.name, size: 145000, mtime: Date.now() }] }
@@ -111,7 +125,13 @@ globalThis.fetch = async (path, init) => {
   else if (path.endsWith('/apply')) value = { ok: true, applied: 1, failed: 0, rejected: [], snapshotted: true, undoDepth: 1, results: [] }
   else if (path.endsWith('/undo')) value = { ok: true, remaining: 0 }
   else if (path.endsWith('/export')) value = { ok: true, pid: 4242, out: 'D:\\out.mp4' }
-  else value = { error: 'unknown ' + path }
+  else if (path.endsWith('/frame')) {
+    frameCalls.push(body)
+    value = { ok: true, cached: false, name: 'f_' + frameCalls.length + '.png', url: '/media?name=x', bytes: 2048, seconds: body.seconds, scale: body.scale, ms: 1500 }
+  } else if (path.endsWith('/proxy')) {
+    proxyCalls.push(body)
+    value = { ok: true, cached: false, name: 'p_' + proxyCalls.length + '.mp4', bytes: 4096, seconds: body.end - body.start, ms: 8000 }
+  } else value = { error: 'unknown ' + path }
   return { ok: true, json: async () => value }
 }
 
@@ -205,6 +225,16 @@ function findClickable(node, label, out) {
   return out
 }
 
+function findNodes(node, className, out) {
+  out = out || []
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { for (const n of node) findNodes(n, className, out); return out }
+  const cn = node.props ? node.props.className : null
+  if (typeof cn === 'string' && cn.split(' ').indexOf(className) >= 0) out.push(node)
+  if (node.children) for (const c of node.children) findNodes(c, className, out)
+  return out
+}
+
 function attempt(label, fn) {
   try { const t = fn(); console.log('✅ ' + label); return t } catch (e) {
     failed = true
@@ -252,6 +282,56 @@ tree = attempt('重渲染', () => paint('工程列表到达'))
   check(t.includes('0332_D'), '片段名出现（工程已打开）')
   const missing = ['裁头', '裁尾', '排序', '海景', '山路', '撤销', '导出选中片段', '导出整条序列'].filter(x => !t.includes(x))
   check(missing.length === 0, '编辑控件齐全' + (missing.length ? '，缺：' + missing.join(',') : ''))
+}
+
+console.log('\n── 预览 ──')
+{
+  tree = attempt('重渲染', () => paint('预览就绪'))
+  const t = textOf(tree).join(' | ')
+  check(t.includes('预览'), '出现「预览」区')
+  check(t.includes('生成预览片段'), '出现「生成预览片段」按钮')
+  check(frameCalls.length > 0, '打开工程后自动请求了画面（' + frameCalls.length + ' 次）')
+  check(findNodes(tree, 'fc-prev-i').length === 1, '画面 <img> 已渲染')
+  check(findNodes(tree, 'fc-thumb').length === 2, '每个片段一行缩略图（' + findNodes(tree, 'fc-thumb').length + '）')
+
+  console.log('\n── 拖动时间轴 ──')
+  const before = frameCalls.length
+  findNodes(tree, 'fc-range')[0].props.onChange({ target: { value: '1.5' } })
+  await new Promise(r => setTimeout(r, 620))   // the scrub render is debounced 420 ms
+  tree = attempt('重渲染', () => paint('拖动后'))
+  check(frameCalls.length > before, '拖动触发了新的帧请求')
+  check(frameCalls[frameCalls.length - 1].seconds > 0, '请求的是片段内的时间点')
+
+  console.log('\n── 生成预览片段 ──')
+  findClickable(tree, '生成预览片段')[0].props.onClick()
+  await new Promise(r => setTimeout(r, 150))
+  tree = attempt('重渲染', () => paint('片段就绪'))
+  check(proxyCalls.length === 1, '调用了 /proxy')
+  const span = proxyCalls.length ? proxyCalls[0].end - proxyCalls[0].start : 0
+  check(span > 0 && span <= 3.01, '片段时长 ≤ 3 秒（' + span.toFixed(2) + 's）')
+  check(findNodes(tree, 'fc-prev-v').length === 1, '出现 <video> 播放器')
+
+  console.log('\n── 切换片段 ──')
+  const rows2 = findNodes(tree, 'fc-clip').filter(n => textOf(n).join('').indexOf('0332_D') >= 0)
+  const beforeSel = frameCalls.length
+  rows2[0].props.onClick()
+  await new Promise(r => setTimeout(r, 150))
+  tree = attempt('重渲染', () => paint('换片段后'))
+  check(frameCalls.length > beforeSel, '换片段后重新请求了画面')
+  check(findNodes(tree, 'fc-prev-v').length === 0, '切片段会关掉上一条预览视频')
+}
+
+console.log('\n── 编辑后缩略图必须跟着刷新 ──')
+{
+  const beforeFrames = frameCalls.length
+  // 「裁头」是行标签，真正的按钮是它后面的 +1s
+  findClickable(tree, '+1s')[0].props.onClick()
+  await new Promise(r => setTimeout(r, 250))
+  tree = attempt('重渲染', () => paint('裁头后'))
+  check(frameCalls.length > beforeFrames, '编辑后重新渲染了画面')
+  const scales = frameCalls.slice(beforeFrames).map(f => f.scale)
+  check(scales.indexOf(0.1) >= 0, '被编辑片段的缩略图也重新生成了（scale 0.1）')
+  check(scales.indexOf(0.25) >= 0, '主预览同时刷新了（scale 0.25）')
 }
 
 console.log('\n── 点击「进度」标签（回归：这一击曾经失效）──')

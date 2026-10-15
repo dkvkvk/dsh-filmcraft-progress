@@ -1,6 +1,6 @@
 {
   "name": "dsh-filmcraft-progress",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "FilmCraft 瑙嗛鍓緫/璋冭壊杩涘害闈㈡澘 + 鍩虹鍓緫 for DeepSeek Harness",
   "type": "module",
   "main": "./dist/native/index.js",

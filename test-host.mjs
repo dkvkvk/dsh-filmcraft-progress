@@ -22,24 +22,31 @@ for (const [path, route] of routes) console.log('  ' + path)
 console.log('注册工具 ' + tools.length + ' 个：' + tools.map(t => t.name).join(', '))
 console.log('')
 
-async function call(path, body, method) {
+// `opts.query` appends a query string; `opts.headers` are request headers.
+// Binary responses come back as `raw` (Buffer) with `body` left unparsed.
+async function call(path, body, method, opts) {
   const route = routes.get(path)
   if (route === undefined) throw new Error('没有路由 ' + path)
   const verb = method || (body === undefined ? 'GET' : 'POST')
+  const extra = opts || {}
   return await new Promise((resolve, reject) => {
     const handlers = {}
     const req = {
       method: verb,
+      url: path + (extra.query ? '?' + extra.query : ''),
+      headers: extra.headers || {},
       on(event, fn) { handlers[event] = fn; return req },
       destroy() { },
     }
     const res = {
       code: 0,
-      writeHead(code) { this.code = code },
+      headers: {},
+      writeHead(code, h) { this.code = code; if (h) Object.assign(this.headers, h) },
       end(text) {
+        const isBuffer = Buffer.isBuffer(text)
         let parsed = text
-        try { parsed = JSON.parse(text) } catch (_) { }
-        resolve({ code: this.code, body: parsed })
+        if (!isBuffer) { try { parsed = JSON.parse(text) } catch (_) { } }
+        resolve({ code: this.code, headers: this.headers, body: parsed, raw: isBuffer ? text : null })
       },
     }
     // Fire data then end once the handler has registered both listeners.
@@ -144,16 +151,90 @@ console.log('')
 const wrong = await call('/dsh-filmcraft-progress/api/open', undefined, 'GET')
 console.log('GET /open（应 405）→ code ' + wrong.code + '  ' + JSON.stringify(wrong.body))
 
-// 9. progress state still works
-const state = await call('/dsh-filmcraft-progress/api/state')
-console.log('GET /state → ok=' + state.body.ok + ' mode=' + state.body.mode + ' phase=' + state.body.phase + ' project=' + state.body.project)
-
 console.log('\n工具 filmcraft_edit 的 action 校验：')
 try { await tools[1].execute({ action: 'nope' }) } catch (e) { console.log('  ' + e.message) }
 
+// 10. preview — render one graded frame to a still
+console.log('\n── 预览 ──')
+const created = []
+const frame = await call('/dsh-filmcraft-progress/api/frame', { project: test, seconds: 3, scale: 0.25 })
+if (frame.body && frame.body.name) created.push(frame.body.name)
+console.log('POST /frame → code ' + frame.code + '  ' + JSON.stringify({
+  ok: frame.body.ok, cached: frame.body.cached, scale: frame.body.scale,
+  bytes: frame.body.bytes, ms: frame.body.ms,
+}))
+const frameOk = frame.body.ok === true && frame.body.bytes > 1000
+console.log('  ' + (frameOk ? '✅ 已渲染 ' + Math.round(frame.body.bytes / 1024) + 'KB 画面' : '❌ 渲染失败：' + frame.body.error))
+
+// 11. serve it back as binary
+const img = await call('/dsh-filmcraft-progress/api/media', undefined, 'GET', { query: 'name=' + frame.body.name })
+const magic = img.raw ? img.raw.subarray(0, 4).toString('hex') : ''
+const pngOk = img.raw !== null && magic === '89504e47'
+console.log('GET /media → code ' + img.code + '  ' + img.headers['content-type'] + '  ' +
+  (img.raw ? img.raw.length + ' B' : '—') + '  accept-ranges=' + img.headers['accept-ranges'])
+console.log('  ' + (pngOk ? '✅ PNG 魔数正确（89504e47）' : '❌ 魔数 ' + magic) +
+  '  声明类型与实际一致：' + (img.headers['content-type'] === 'image/png' ? '✅' : '❌ ' + img.headers['content-type']))
+
+// 12. the cache must be hit on a repeat request
+const again = await call('/dsh-filmcraft-progress/api/frame', { project: test, seconds: 3, scale: 0.25 })
+console.log('重复请求 → cached=' + again.body.cached + '  ' + (again.body.cached === true ? '✅ 命中缓存' : '❌ 未命中'))
+
+// 13. media guards
+for (const [label, query, want] of [
+  ['路径穿越', 'name=..%2F..%2Ffilm-status.json', 400],
+  ['绝对路径', 'name=C%3A%5CWindows%5Cwin.ini', 400],
+  ['带分隔符', 'name=sub%2Ff.jpg', 400],
+  ['不存在的文件', 'name=f_deadbeefdeadbeef.jpg', 404],
+]) {
+  const r = await call('/dsh-filmcraft-progress/api/media', undefined, 'GET', { query })
+  console.log('  ' + label.padEnd(12) + '→ code ' + r.code + '  ' +
+    (r.code === want ? '✅' : '❌ 期望 ' + want) + '  ' + (r.body && r.body.error ? r.body.error : ''))
+}
+
+// 14. Range must work, or <video> cannot seek
+const ranged = await call('/dsh-filmcraft-progress/api/media', undefined, 'GET', {
+  query: 'name=' + frame.body.name, headers: { range: 'bytes=0-99' },
+})
+console.log('Range bytes=0-99 → code ' + ranged.code + '  ' + ranged.headers['content-range'] +
+  '  ' + (ranged.raw ? ranged.raw.length + ' B' : '—') +
+  '  ' + (ranged.code === 206 && ranged.raw.length === 100 ? '✅ 支持分段' : '❌'))
+
+// 15. proxy clip
+const proxy = await call('/dsh-filmcraft-progress/api/proxy', { project: test, start: 0, end: 1, scale: 0.25, quality: 60 })
+if (proxy.body && proxy.body.name) created.push(proxy.body.name)
+console.log('POST /proxy (1s) → code ' + proxy.code + '  ' + JSON.stringify({
+  ok: proxy.body.ok, cached: proxy.body.cached, bytes: proxy.body.bytes, ms: proxy.body.ms,
+}))
+if (proxy.body.ok) {
+  const vid = await call('/dsh-filmcraft-progress/api/media', undefined, 'GET', { query: 'name=' + proxy.body.name })
+  const ftyp = vid.raw ? vid.raw.subarray(4, 8).toString('ascii') : ''
+  console.log('  回读 ' + Math.round(vid.raw.length / 1024) + 'KB  ' + vid.headers['content-type'] +
+    '  ftyp=' + ftyp + '  ' + (ftyp === 'ftyp' ? '✅ 合法 MP4' : '❌'))
+}
+
+// 16. proxy guards
+for (const [label, body, want] of [
+  ['超长片段', { project: test, start: 0, end: 999, scale: 0.25 }, 500],
+  ['结束早于起始', { project: test, start: 5, end: 2, scale: 0.25 }, 500],
+  ['非工程路径', { project: 'C:\\Windows\\win.ini', start: 0, end: 1 }, 500],
+]) {
+  const r = await call('/dsh-filmcraft-progress/api/proxy', body)
+  console.log('  ' + label.padEnd(12) + '→ code ' + r.code + '  ' + (r.code === want ? '✅' : '❌ 期望 ' + want) +
+    '  ' + (r.body && r.body.error ? String(r.body.error).slice(0, 60) : ''))
+}
+
+// 17. progress state still works, and a paused job must not claim 99.9%
+const state = await call('/dsh-filmcraft-progress/api/state')
+console.log('\nGET /state → ok=' + state.body.ok + ' mode=' + state.body.mode + ' phase=' + state.body.phase +
+  ' percent=' + state.body.percent + ' (' + state.body.percentBasis + ')')
+console.log('  ' + (state.body.percent === null || state.body.percent < 50
+  ? '✅ 已暂停的任务不再显示接近 100%'
+  : '❌ 暂停任务仍报 ' + state.body.percent + '%'))
+
 for (const d of disposers) { try { d() } catch (_) { } }
-// Remove the test project AND the undo snapshots it produced — otherwise the
-// project picker keeps listing our own backups.
+// Remove the test project, the undo snapshots it produced, and the preview
+// stills/clips it rendered — otherwise the picker lists our own backups and the
+// preview cache keeps files keyed to a project that no longer exists.
 {
   const { rmSync, readdirSync } = await import('node:fs')
   if (existsSync(test)) rmSync(test, { force: true })
@@ -164,5 +245,12 @@ for (const d of disposers) { try { d() } catch (_) { } }
       if (n.indexOf('panel-test.fcproj.') >= 0) { rmSync(snapDir + '\\' + n, { force: true }); cleaned++ }
     }
   } catch (_) { }
-  console.log('\n完成（测试工程已删除，清理快照 ' + cleaned + ' 个）')
+  let previews = 0
+  const previewDir = 'D:\\Myfiles\\临时\\build\\preview'
+  try {
+    for (const n of readdirSync(previewDir)) {
+      if (created.indexOf(n) >= 0) { rmSync(previewDir + '\\' + n, { force: true }); previews++ }
+    }
+  } catch (_) { }
+  console.log('\n完成（测试工程已删除，清理快照 ' + cleaned + ' 个、预览 ' + previews + ' 个）')
 }
