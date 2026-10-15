@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1 — 2026-10-15
+
+**修：剪辑页点击全部无响应。**
+
+- `edSet` 通知监听者时调用 `setter()` 不带参数 → `setter(undefined)`。首次
+  `0 → undefined` 算状态变化、能重渲染，之后每次都是 `undefined → undefined`，
+  React 判定没变直接 bail out。结果：能切到「剪辑」标签（那一次是真变化），
+  但点「进度」切不回去、点工程行打不开工程，所有 onClick 都成了空操作。
+  改为显式版本号 `ed.version` 自增后传给 setter，保证值一定变化；
+  `useEditor` 挂载时补一次 `set(ed.version)`。
+- 工程扫描排除 `snapshots` 目录与 `<name>.fcproj.<时间戳>.fcproj` 快照文件 ——
+  撤销备份本身也是 `.fcproj`，之前会混进工程列表。
+- `test-client.mjs` 改为**忠实模拟 React**：hook 状态跨渲染保持，setter 用
+  `Object.is` 判定、相等则跳过渲染。已确认这个测试对着修复前的 `dist` 跑会
+  失败（能复现上述现象），不是假绿。
+- `test-host.mjs` 清理自己产生的快照文件。
+
 ## 0.2.0 — 2026-10-14
 
 **两种任务模式 + 面板里直接剪片。**
