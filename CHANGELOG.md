@@ -1,6 +1,30 @@
 # Changelog
 
-## 0.3.0 — 2026-10-20
+## 0.3.0 — 2026-10-21
+
+**修复：插件在桌面端整条挂载失败（面板完全不工作、工具也不出现）。**
+
+这一版重写后，`apply` 在真实宿主里连抛两个错，Cordis 判定该条目挂载失败，并把这次
+`apply` 里已经注册好的 HTTP 路由**全部回收** —— 症状是「组合树里有它、模块也 import
+了，但路由全 404、`filmcraft_progress` 工具也不出现」。两个错误都不报在面板上，只在
+宿主启动日志里：
+
+1. `webserver: duplicate exact route "/dsh-filmcraft-progress/api/workspace"`
+   —— 宿主的 `ctx.webServer.register` **按 path 建表**，同一路径注册第二条直接抛错。
+   我把 `workspace / projects / project / jobs` 这对「GET 读 + POST 写」拆成了两条
+   路由，第二条必然撞车。改为**一个路径只注册一条路由，在同一个 handler 里按
+   `req.method` 分流**（宿主这一层只看 path，不看 method）。路由数 22 → 18。
+2. `cannot get property "tools" without inject`
+   —— 读 `ctx.tools` 时 Cordis 会校验 `inject`，而重写时把 `inject: ['tools']` 丢成了
+   `[]`。`webServer` 由构建脚本自动补，`tools` 不会，必须自己声明。
+
+为什么两套测试都没抓到：`test-client.mjs` 只渲染前端，`test/smoke-host.mjs` 用的是
+自己写的假 ctx（注册路由来者不拒、`inject` 不校验），真实宿主的约束它模拟不到。现在
+补上了真机验证：把 profile 复制到独立 `DSH_HOME`、`node_modules` 用 junction 指回
+原件，再用桌面端自带的
+`resources/runtime/cli/bin/dsh.cmd --profile desktop-diag --no-open --port 59911`
+启动 —— 启动日志会打印 `N entries did not activate` 和完整栈。两个 bug 都是这一步
+当场读出来的。
 
 **修复：启动即崩（`dsh-filmcraft-progress: import failed: ctx is not defined`）。**
 

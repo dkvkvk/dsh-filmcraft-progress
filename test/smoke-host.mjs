@@ -16,7 +16,8 @@ const tools = new Map()
 const ctx = {
   effect(fn) { return fn() },
   webServer: {
-    register(route) { routes.set(route.method + ' ' + route.path, route); return () => { } },
+    // 宿主按 path 建表（一个路径一条路由，方法在 handler 里分流），照这个来。
+    register(route) { routes.set(route.path, route); return () => { } },
   },
   tools: {
     register(tool) { tools.set(tool.name, tool); return tool },
@@ -78,7 +79,7 @@ async function call(key, body) {
   // Read vs write is not guessable from the key: `frame.read` carries a request
   // body and is a POST, `media.read` streams bytes and is a GET. Spell it out.
   const resolved = /^(state|workspace|projects|project|assets|browse|jobs)\.(read|list)$/.test(key) || key === 'media.read' ? 'GET' : 'POST'
-  const route = routes.get(resolved + ' ' + path)
+  const route = routes.get(path)
   if (!route) throw new Error('no route for ' + key + ' (' + resolved + ' ' + path + ')')
   const url = resolved === 'GET' && body ? path + '?' + new URLSearchParams(body).toString() : path
   const res = fakeRes()
@@ -189,7 +190,7 @@ const frame = await call('frame.read', { project: merged.project.file, seconds: 
 show('frame.read', frame)
 if (frame && frame.name) {
   const media = fakeRes()
-  await routes.get('GET ' + BASE + '/media').handler(fakeReq('GET', BASE + '/media?name=' + encodeURIComponent(frame.name)), media)
+  await routes.get(BASE + '/media').handler(fakeReq('GET', BASE + '/media?name=' + encodeURIComponent(frame.name)), media)
   console.log('  media:', media.statusCode, media.headers['content-type'], media.body.length, 'bytes')
 }
 

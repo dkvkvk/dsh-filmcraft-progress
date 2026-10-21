@@ -231,10 +231,10 @@ window.__ModuleLoader__.load({
     // each mutation returns the fresh detail (the host re-reads it), and the store
     // just adopts it. That is what keeps the panel honest after an edit — there is
     // no second copy of the timeline to drift out of date.
-    
+
     const TICKS = 254016000000
     const PROXY_MAX = 20
-    
+
     const store = {
       booted: false,
       mounted: false,
@@ -268,7 +268,7 @@ window.__ModuleLoader__.load({
       scrubTimer: null,
       noticeTimer: null,
     }
-    
+
     function fcEmit() {
       store.version += 1
       const list = Array.from(store.listeners)
@@ -276,11 +276,11 @@ window.__ModuleLoader__.load({
         try { listener() } catch (_) { }
       }
     }
-    
+
     function fcErr(error) {
       return error && error.message ? error.message : String(error)
     }
-    
+
     function fcNotice(text) {
       store.notice = String(text || '')
       if (store.noticeTimer !== null) clearTimeout(store.noticeTimer)
@@ -291,7 +291,7 @@ window.__ModuleLoader__.load({
       }, 2600)
       fcEmit()
     }
-    
+
     // ── formatting ──────────────────────────────────────────────────────────────
     function fcPad(n) { return String(n).padStart(2, '0') }
     function fcTime(sec) {
@@ -339,7 +339,7 @@ window.__ModuleLoader__.load({
       const keep = Math.floor((max - 1) / 2)
       return text.slice(0, keep) + '…' + text.slice(text.length - (max - keep - 1))
     }
-    
+
     // ── lookups ─────────────────────────────────────────────────────────────────
     function fcProjectRef() {
       if (store.projectId) return store.projectId
@@ -376,7 +376,7 @@ window.__ModuleLoader__.load({
     function fcRunningJobs() {
       return store.jobs.filter(function (job) { return job.state === 'running' })
     }
-    
+
     // ── request helper ──────────────────────────────────────────────────────────
     // Every write goes through here so there is exactly one place that clears the
     // previous error, one place that formats a failure, and one busy flag the views
@@ -395,14 +395,14 @@ window.__ModuleLoader__.load({
         fcEmit()
       }
     }
-    
+
     // ── data ────────────────────────────────────────────────────────────────────
     async function fcRefreshJobs() {
       const result = await host.call('jobs.read', {})
       store.jobs = result && Array.isArray(result.jobs) ? result.jobs : []
       fcEmit()
     }
-    
+
     async function fcBoot() {
       if (store.booted) return
       store.booted = true
@@ -415,14 +415,14 @@ window.__ModuleLoader__.load({
       try { await fcRefreshJobs() } catch (_) { }
       fcEmit()
     }
-    
+
     function fcDropUrls() {
       if (store.frameUrl) { try { URL.revokeObjectURL(store.frameUrl) } catch (_) { } }
       if (store.proxyUrl) { try { URL.revokeObjectURL(store.proxyUrl) } catch (_) { } }
       store.frameUrl = ''
       store.proxyUrl = ''
     }
-    
+
     function fcSetDetail(detail, options) {
       const keep = !!(options && options.keep)
       fcDropUrls()
@@ -445,7 +445,7 @@ window.__ModuleLoader__.load({
         if (clip && store.detail && store.detail.sequence) fcFrame(clip.start + store.scrub)
       }
     }
-    
+
     async function fcOpenProject(id) {
       if (!id) return
       const detail = await fcRun('打开工程', function () {
@@ -457,7 +457,7 @@ window.__ModuleLoader__.load({
         fcRefreshAssets().catch(function () { })
       }
     }
-    
+
     async function fcRefreshProject() {
       if (!store.detail) return
       const detail = await fcRun('刷新工程', function () {
@@ -465,7 +465,7 @@ window.__ModuleLoader__.load({
       })
       if (detail) fcSetDetail(detail, { keep: true })
     }
-    
+
     async function fcScan() {
       const result = await fcRun('扫描工程', function () {
         return host.call('projects.list', { rescan: true })
@@ -475,7 +475,7 @@ window.__ModuleLoader__.load({
       const found = Array.isArray(result.scanned) ? result.scanned.length : 0
       fcNotice('扫描到 ' + found + ' 个工程文件，列表里 ' + store.projects.length + ' 个')
     }
-    
+
     async function fcNewSequence() {
       if (!store.detail) return
       const sequence = fcSequence()
@@ -493,7 +493,7 @@ window.__ModuleLoader__.load({
       if (result && result.detail) fcSetDetail(result.detail)
       if (result) fcNotice('已新建序列')
     }
-    
+
     async function fcActivateSequence(id) {
       if (!store.detail) return
       const result = await fcRun('切换序列', function () {
@@ -501,7 +501,7 @@ window.__ModuleLoader__.load({
       })
       if (result && result.detail) fcSetDetail(result.detail)
     }
-    
+
     // ── editing ─────────────────────────────────────────────────────────────────
     async function fcEdit(commands, label) {
       const result = await fcRun(label, function () {
@@ -518,7 +518,7 @@ window.__ModuleLoader__.load({
       }
       return result
     }
-    
+
     function fcTrim(edge, deltaSec) {
       const clip = fcSelectedClip()
       if (!clip) return
@@ -526,13 +526,13 @@ window.__ModuleLoader__.load({
       fcEdit([{ id: 'timeline.trim', params: { clip: clip.clip, edge: edge, mode: 'ripple', delta: delta } }],
         (edge === 'in' ? '裁头 ' : '裁尾 ') + (deltaSec > 0 ? '+' : '') + deltaSec + 's ')
     }
-    
+
     function fcDeleteClip() {
       const clip = fcSelectedClip()
       if (!clip) return
       fcEdit([{ id: 'edit.rippleDelete', params: { clips: [clip.clip] } }], '删除片段 ')
     }
-    
+
     function fcMoveClip(dir) {
       const clip = fcSelectedClip()
       if (!clip) return
@@ -547,13 +547,13 @@ window.__ModuleLoader__.load({
         { id: 'timeline.move', params: { moves: [{ clip: next.clip, track: next.track, time: Math.round(clip.start * TICKS) }] } },
       ], dir < 0 ? '上移 ' : '下移 ')
     }
-    
+
     function fcToggleClip() {
       const clip = fcSelectedClip()
       if (!clip) return
       fcEdit([{ id: 'clip.enable', params: { clips: [clip.clip] } }], clip.enabled ? '停用片段 ' : '启用片段 ')
     }
-    
+
     async function fcApplyGrade(presetId) {
       const clip = fcSelectedClip()
       if (!clip || !presetId) return
@@ -571,7 +571,7 @@ window.__ModuleLoader__.load({
       }
       fcNotice('已套用「' + (preset ? preset.name : presetId) + '」')
     }
-    
+
     async function fcClearGrade() {
       const clip = fcSelectedClip()
       if (!clip) return
@@ -581,7 +581,7 @@ window.__ModuleLoader__.load({
       if (result && result.detail) fcSetDetail(result.detail, { keep: true })
       if (result) fcNotice('已清空调色')
     }
-    
+
     async function fcUndo() {
       if (!store.detail) return
       const result = await fcRun('撤销', function () {
@@ -592,7 +592,7 @@ window.__ModuleLoader__.load({
         fcNotice('已撤销一步')
       }
     }
-    
+
     // ── preview ─────────────────────────────────────────────────────────────────
     async function fcFrame(seconds) {
       if (!store.detail || !fcSequence()) return
@@ -618,7 +618,7 @@ window.__ModuleLoader__.load({
         }
       }
     }
-    
+
     // Scrubbing should not spawn one render process per pixel. 400 ms after the last
     // move is slow enough to coalesce a drag and fast enough to feel immediate.
     function fcScrub(seconds) {
@@ -632,7 +632,7 @@ window.__ModuleLoader__.load({
         if (clip) fcFrame(clip.start + store.scrub)
       }, 400)
     }
-    
+
     async function fcProxy() {
       const clip = fcSelectedClip()
       if (!clip || store.proxyBusy) return
@@ -660,7 +660,7 @@ window.__ModuleLoader__.load({
         fcEmit()
       }
     }
-    
+
     function fcWholeClip() {
       const clip = fcSelectedClip()
       if (!clip) return
@@ -668,7 +668,7 @@ window.__ModuleLoader__.load({
       fcScrub(0)
       fcEmit()
     }
-    
+
     // ── export ──────────────────────────────────────────────────────────────────
     async function fcExport() {
       if (!store.detail) return
@@ -684,7 +684,7 @@ window.__ModuleLoader__.load({
       try { await fcRefreshJobs() } catch (_) { }
       fcEmit()
     }
-    
+
     async function fcJobAction(action, id) {
       const result = await fcRun(action === 'cancel' ? '取消任务' : '移除任务', function () {
         return host.call('jobs.write', { action: action, id: id })
@@ -692,7 +692,7 @@ window.__ModuleLoader__.load({
       if (!result) return
       try { await fcRefreshJobs() } catch (_) { }
     }
-    
+
     // Polling exists only while a job is in flight: the host samples the output file
     // on read, so there is nothing to gain from asking when nothing is running.
     function fcEnsurePolling() {
@@ -703,7 +703,7 @@ window.__ModuleLoader__.load({
         fcRefreshJobs().catch(function () { })
       }, 1500)
     }
-    
+
     function fcSet(patch) {
       for (const key of Object.keys(patch)) store[key] = patch[key]
       fcEmit()
@@ -718,7 +718,7 @@ window.__ModuleLoader__.load({
     //
     // Every action follows the fcRun convention: one busy label, one error slot, and
     // a notice on success, so the views never manage their own loading state.
-    
+
     Object.assign(store, {
       // A directory listing for the media picker. Kept separate from `assets`
       // because browsing is a filesystem view and assets is a project view.
@@ -741,36 +741,36 @@ window.__ModuleLoader__.load({
       assets: [],
       presets: [],
     })
-    
+
     // fcErr() only formats a thrown value; it does not touch the store. Validation
     // failures need the error slot filled, so they go through this instead.
     function fcFail(text) {
       store.error = String(text || '')
       fcEmit()
     }
-    
+
     function fcStagingIndex(path) {
       for (let i = 0; i < store.staging.length; i += 1) if (store.staging[i] === path) return i
       return -1
     }
-    
+
     function fcStage(path) {
       if (!path) return
       if (fcStagingIndex(path) >= 0) { fcNotice('已经在待合并列表里'); return }
       store.staging.push(path)
       fcEmit()
     }
-    
+
     function fcUnstage(path) {
       store.staging = store.staging.filter(function (entry) { return entry !== path })
       fcEmit()
     }
-    
+
     function fcUnstageAll() {
       store.staging = []
       fcEmit()
     }
-    
+
     // Reordering is the whole point of a merge UI, so both directions are explicit
     // rather than a drag handle — the panel is too narrow for reliable dragging.
     function fcStageMove(path, dir) {
@@ -784,7 +784,7 @@ window.__ModuleLoader__.load({
       store.staging = list
       fcEmit()
     }
-    
+
     // ── browse ──────────────────────────────────────────────────────────────────
     async function fcBrowse(path) {
       const result = await fcRun('读取目录', function () {
@@ -801,11 +801,11 @@ window.__ModuleLoader__.load({
       store.browseOpen = true
       fcEmit()
     }
-    
+
     function fcBrowseUp() {
       if (store.browse.parent) fcBrowse(store.browse.parent)
     }
-    
+
     // ── project registry (multi-project) ────────────────────────────────────────
     async function fcProjectAdd(file, name) {
       const body = { action: 'add', file: file }
@@ -819,7 +819,7 @@ window.__ModuleLoader__.load({
       if (result.project) await fcOpenProject(result.project.id)
       return result
     }
-    
+
     async function fcProjectRemove(id) {
       const result = await fcRun('移除工程', function () {
         return host.call('projects.write', { action: 'remove', project: id })
@@ -829,7 +829,7 @@ window.__ModuleLoader__.load({
       if (store.detail && store.projectId === id) fcSetDetail(null)
       fcNotice('已从列表移除（文件本身没动）')
     }
-    
+
     async function fcProjectRename(id, name) {
       if (!name) return
       const result = await fcRun('重命名工程', function () {
@@ -839,7 +839,7 @@ window.__ModuleLoader__.load({
       store.projects = result.projects || []
       fcNotice('已重命名')
     }
-    
+
     async function fcRescan() {
       const result = await fcRun('重新扫描', function () {
         return host.call('projects.write', { action: 'rescan' })
@@ -849,7 +849,7 @@ window.__ModuleLoader__.load({
       const found = Array.isArray(result.scanned) ? result.scanned.length : 0
       fcNotice('扫描到 ' + found + ' 个 .fcproj')
     }
-    
+
     async function fcProjectCreate(file, name) {
       // A project cannot be created out of nothing by this engine: the CLI refuses a
       // path that does not exist yet. `--empty import … --save-as` is the documented
@@ -862,7 +862,7 @@ window.__ModuleLoader__.load({
       if (result.project) await fcOpenProject(result.project.id)
       return result
     }
-    
+
     // ── media ───────────────────────────────────────────────────────────────────
     async function fcRefreshAssets() {
       if (!store.detail) return
@@ -873,7 +873,7 @@ window.__ModuleLoader__.load({
       store.assets = Array.isArray(result.assets) ? result.assets : []
       fcEmit()
     }
-    
+
     // Importing adds files to the project bin without touching the timeline. Placing
     // them is a separate intent, so it stays a separate button.
     async function fcImport(files) {
@@ -895,7 +895,7 @@ window.__ModuleLoader__.load({
       }
       return result
     }
-    
+
     async function fcPlaceStaging(options) {
       const list = (options && options.files ? options.files : store.staging).slice()
       if (list.length === 0) { fcFail('请先选素材'); return null }
@@ -919,7 +919,7 @@ window.__ModuleLoader__.load({
       fcNotice('已按顺序放到时间线')
       return result
     }
-    
+
     // ── merge ───────────────────────────────────────────────────────────────────
     async function fcMergeRun(options) {
       const request = options || {}
@@ -960,7 +960,7 @@ window.__ModuleLoader__.load({
       fcEmit()
       return result
     }
-    
+
     // Merging into a brand-new project is the common case when the sources are not
     // already part of anything, so the default name comes from the first file.
     function fcMergeDefaultName() {
@@ -969,7 +969,7 @@ window.__ModuleLoader__.load({
       const stem = first.replace(/\.[^.]+$/, '')
       return store.staging.length === 1 ? stem : stem + ' 等 ' + store.staging.length + ' 段'
     }
-    
+
     // ── export extras ───────────────────────────────────────────────────────────
     async function fcInterchange(format) {
       if (!store.detail) return
@@ -984,7 +984,7 @@ window.__ModuleLoader__.load({
       if (!result) return
       fcNotice('已导出 ' + result.format + '：' + result.out.split(/[\\/]/).pop())
     }
-    
+
     // ── sequences ───────────────────────────────────────────────────────────────
     async function fcCreateSequence(options) {
       if (!store.detail) return null
@@ -1004,7 +1004,7 @@ window.__ModuleLoader__.load({
       if (result) fcNotice('已新建序列')
       return result
     }
-    
+
     async function fcDeleteSequence(id) {
       const result = await fcRun('删除序列', function () {
         return host.call('sequence.write', { action: 'delete', project: fcProjectRef(), sequence: id })
@@ -1012,7 +1012,7 @@ window.__ModuleLoader__.load({
       if (result && result.detail) fcSetDetail(result.detail)
       if (result) fcNotice('已删除序列')
     }
-    
+
     async function fcRenameSequence(id, name) {
       if (!name) return
       const result = await fcRun('重命名序列', function () {
@@ -1021,7 +1021,7 @@ window.__ModuleLoader__.load({
       if (result && result.detail) fcSetDetail(result.detail)
       if (result) fcNotice('已重命名')
     }
-    
+
     // ── presets ─────────────────────────────────────────────────────────────────
     async function fcPresetSave(preset) {
       const result = await fcRun('保存预设', function () {
@@ -1032,7 +1032,7 @@ window.__ModuleLoader__.load({
       fcNotice('已保存预设「' + (result.preset ? result.preset.name : '') + '」')
       return result
     }
-    
+
     async function fcPresetRemove(id) {
       const result = await fcRun('删除预设', function () {
         return host.call('presets.write', { action: 'remove', id: id })
@@ -1041,7 +1041,7 @@ window.__ModuleLoader__.load({
       store.workspace = Object.assign({}, store.workspace, { presets: result.presets })
       fcNotice('已删除预设')
     }
-    
+
     // ── settings ────────────────────────────────────────────────────────────────
     async function fcSetRoot(root) {
       const result = await fcRun('切换工作区', function () {
@@ -1053,7 +1053,7 @@ window.__ModuleLoader__.load({
       fcSetDetail(null)
       fcNotice('工作区已切换到 ' + (result.workspace ? result.workspace.rootDisplay : root))
     }
-    
+
     async function fcSetCli(cliPath) {
       const result = await fcRun('设置 CLI 路径', function () {
         return host.call('workspace.write', { action: 'setCli', cliPath: cliPath })
@@ -1062,7 +1062,7 @@ window.__ModuleLoader__.load({
       store.workspace = result.workspace || store.workspace
       fcNotice(result.workspace && result.workspace.cli && result.workspace.cli.exists ? 'CLI 可达' : '这个路径下找不到 filmcraft-cli')
     }
-    
+
     // ── multi-select + batch grade ──────────────────────────────────────────────
     // Batch operations are what "对不同的视频做处理" means in practice: pick several
     // clips, apply one recipe to all of them, in one undo step.
@@ -1074,22 +1074,22 @@ window.__ModuleLoader__.load({
       store.multi = list
       fcEmit()
     }
-    
+
     function fcMultiSet(clipIds) {
       store.multi = (clipIds || []).slice()
       fcEmit()
     }
-    
+
     function fcMultiAll() {
       const all = fcClips().map(function (clip) { return clip.clip })
       store.multi = store.multi.length === all.length ? [] : all
       fcEmit()
     }
-    
+
     function fcMultiIds() {
       return store.multi.slice()
     }
-    
+
     async function fcGradeMany(clipIds, presetId) {
       const ids = (clipIds && clipIds.length > 0 ? clipIds : store.multi).slice()
       if (ids.length === 0) { fcFail('先选片段'); return null }
@@ -1108,7 +1108,7 @@ window.__ModuleLoader__.load({
       fcEmit()
       return result
     }
-    
+
     async function fcGradeClearMany(clipIds) {
       const ids = (clipIds && clipIds.length > 0 ? clipIds : store.multi).slice()
       if (ids.length === 0) return null

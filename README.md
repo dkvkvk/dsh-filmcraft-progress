@@ -239,10 +239,36 @@ npm run build     # = node scripts/build-native.mjs
 | 面板不出现 | `dsh.profile.bundles` 里写成了 `insert.id`，应写包名 |
 | 「应用无法启动或已意外停止」 | 客户端模块顶层碰了 `ctx`；`node test-client.mjs` 第一条断言会抓到 |
 | 改了宿主端没反应 | 宿主端需要**重启 DSH**，刷网页不够 |
+| 面板在、请求全 404、`filmcraft_*` 工具也不出现 | **整条插件挂载失败**：`apply` 抛错后 Cordis 把这次注册的路由全回收。已知两种原因见下节 |
 | 所有片段 fps 显示 `?` | 引擎返回的是 `settings.frame_rate:{num,den}`，不是 `settings.fps` |
 | 编辑报「命令不存在」 | 命令 id 没对着 `commands --json` 核 |
 | 合并出来画面被裁/补边 | 看「合并」页的兼容性预检，尺寸不一致会提前警告 |
 | 预览一直转圈 | 预览是串行渲染；等前一个渲完，或调低缩放 |
+
+### 看宿主真正的报错（最省时间的一步）
+
+桌面端不打印插件激活失败，面板上也看不到 —— 但宿主自己会报。桌面 profile 被
+Electron 独占（直接 `dsh --profile desktop` 会被拒），所以复制一份到独立 `DSH_HOME`，
+`node_modules` 用 junction 指回原件（不用拷几 GB），再用**桌面端自带的**同版本 CLI：
+
+```bash
+H=D:\tmp\dsh-diag
+cp ~/.dsh/profiles/desktop/package.json "$H/profiles/desktop-diag/"
+powershell -c "New-Item -ItemType Junction -Path '$H\profiles\desktop-diag\node_modules' -Target 'C:\Users\20646\.dsh\profiles\desktop\node_modules'"
+DSH_HOME="$H" "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" \
+  --profile desktop-diag --no-open --port 59911
+```
+
+启动日志头部会打 `dsh: warning: N entries did not activate` + **每个失败条目的完整栈**。
+本插件的两条已知死法都在这里现形：
+
+1. `webserver: duplicate exact route "<path>"` —— 同一路径注册了两条路由。宿主的
+   `webServer.register` **按 path 建表**，读写必须在同一个 handler 里按 `req.method` 分流。
+2. `cannot get property "tools" without inject` —— `inject` 漏了 `'tools'`。`webServer`
+   由构建脚本自动补，`tools` 不会。
+
+> 两套 node 测试都抓不到这两条：`test/smoke-host.mjs` 用的是自己写的假 ctx，注册路由
+> 来者不拒、`inject` 也不校验。真机约束只有真宿主能验。
 
 ## 测试
 

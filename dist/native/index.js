@@ -2500,7 +2500,10 @@ function createPlugin(harness) {
 
   return {
     name: 'filmcraft-progress',
-    inject: [],
+    // 'tools' 必须声明：读 ctx.tools 时 Cordis 校验 inject，缺了会抛
+    // "cannot get property \"tools\" without inject"，整个条目挂载失败
+    // （已注册的路由和工具一起被回收，症状是全部 404）。
+    inject: ['tools'],
     apply: apply,
   }
 }
@@ -2524,37 +2527,37 @@ function readBody(req) {
   })
 }
 
-function registerRoute(ctx, route, handler, label) {
+// 宿主 webserver 按 path 建表，同路径注册第二条会抛 duplicate exact route。
+// 所以一个 path 只注册一次，读/写两条处理函数在里面按 req.method 分流。
+function registerRoute(ctx, slot) {
+  const variants = slot.variants
   return ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
-    method: route.method,
-    path: route.path,
+    path: slot.path,
     async handler(req, res) {
-      if (route.kind === 'raw') {
-        try { return await handler(req, res) } catch (error) {
-          try {
-            res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
-            res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
-          } catch (_) { }
-          return
-        }
-      }
       const send = (code, value) => {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify(value))
       }
-      if (req.method !== route.method) return send(405, { error: 'method not allowed' })
+      const hit = variants.find((v) => v.method === req.method)
+      if (hit === undefined) return send(405, { error: 'method not allowed' })
+      if (hit.kind === 'raw') {
+        try { return await hit.handler(req, res) } catch (error) {
+          try { send(500, { error: error instanceof Error ? error.message : String(error) }) } catch (_) { }
+          return
+        }
+      }
       try {
         const body = req.method === 'POST' ? await readBody(req) : null
         const query = new URLSearchParams((req.url || '').split('?')[1] || '')
         const merged = Object.assign({}, body || {})
         for (const [k, v] of query.entries()) if (merged[k] === undefined) merged[k] = v
-        send(200, await handler(merged))
+        send(200, await hit.handler(merged))
       } catch (error) {
         send(500, { error: error instanceof Error ? error.message : String(error) })
       }
     },
-  }), label)
+  }), 'dsh-filmcraft-progress: ' + slot.path)
 }
 
 export function apply(ctx) {
@@ -2582,6 +2585,7 @@ export function apply(ctx) {
       'proxy.write': { method: 'POST', path: '/dsh-filmcraft-progress/api/proxy', kind: 'json' },
       'media.read': { method: 'GET', path: '/dsh-filmcraft-progress/api/media', kind: 'raw' },
     }
+  const pending = new Map()
   const harness = {
     defineTool,
     apiBase: '/dsh-filmcraft-progress/api',
@@ -2591,13 +2595,16 @@ export function apply(ctx) {
     handle(key, handler) {
       const route = routes[key]
       if (route === undefined) throw new Error('unsupported handler: ' + key)
-      const label = 'dsh-filmcraft-progress: ' + key
-      // Raw routes write the response themselves and need (req, res); JSON
-      // routes only ever get the merged body/query object.  Wrapping the raw
-      // ones in (body) => handler(body || {}) would hand them res === undefined.
-      if (route.kind === 'raw') return registerRoute(ctx, route, handler, label)
-      return registerRoute(ctx, route, (body) => handler(body || {}), label)
+      // 收集到 path 槽位里，等 createPlugin 跑完再一次性注册。
+      let slot = pending.get(route.path)
+      if (slot === undefined) {
+        slot = { path: route.path, kind: route.kind, variants: [] }
+        pending.set(route.path, slot)
+      }
+      slot.variants.push({ method: route.method, kind: route.kind, handler })
     },
   }
-  return createPlugin(harness).apply(ctx)
+  const result = createPlugin(harness).apply(ctx)
+  for (const slot of pending.values()) registerRoute(ctx, slot)
+  return result
 }
