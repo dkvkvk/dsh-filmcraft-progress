@@ -1910,7 +1910,7 @@ function createPlugin(harness) {
   // loads config and registry fresh, because both can change at runtime (the user
   // moves the workspace, adds a preset) and a cached copy would silently diverge.
 
-  const PLUGIN_VERSION = '0.3.0'
+  const PLUGIN_VERSION = '0.3.1'
 
   // The report file the *old* pipeline wrote. Kept readable so existing scripts
   // keep working; nothing new is written in this format.

@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.1 — 2026-10-21
+
+**界面重做：从「能用的控制台」改成能看的工具面板。** 没有改任何接口，宿主端只动了
+版本号；`dist/native/index.js` 里的路由和工具与 0.3.0 完全一致。
+
+改之前先解决了一个前置问题：面板只有 344 px 宽，而**我看不到它**。所以先加了
+`tools/preview.mjs` —— 用假 React 跑真实 `dist/native/client.js`，把五个页签依次
+渲染并序列化成 HTML，再交给无头 Chrome 截图（`npm run preview`）。这一步立刻暴露了
+三个只靠读代码发现不了的问题：
+
+1. **标签栏被角标撑成两行**。「任务 · 1」整串是标签文本，宽度一紧就折行，五颗标签
+   高度不齐。改成 `fc-tab-lb` + `fc-tab-n` 两个元素，标签栏统一 27 px 不换行。
+2. **等宽字体铺满全屏**。上一版 `font-family` 直接给了 mono 栈，10 px 字号下的中文
+   标签又挤又灰。现在中文走系统 UI 字体（12.5 px 基准，11 px 次要），mono 只留给
+   路径、字节数、时间码这类机器文本。
+3. **`undefined` 会漏到界面上**。`detail.name · N 序列 · rev <revision>` 在宿主没返回
+   `revision` 时直接印出 `rev undefined`（真实数据的早期工程、或 `--save` 之前读到的
+   快照都可能缺这个字段）。现在缺字段就整段不显示，名字缺省为「未命名工程」。
+
+样式层面的改动：
+
+- **去掉「框套框」**。列表原本是「带边框的容器 + 每行带边框的卡片」，在 344 px 里
+  叠了三层灰边。现在是一个面 + 发丝分隔线，选中行用左侧 2 px 强调条。
+- **KPI 从四个独立方框改成一张表**（`gap:1px` 露出底色当分隔线），信息密度更高。
+- **按钮归一**：只有 ghost / primary / danger 三态，统一 23 px 高，`focus-visible`
+  有 2 px 焦点环，`prefers-reduced-motion` 下关掉动画。
+- **配色跟随宿主主题**，不再只看 `prefers-color-scheme`：桌面端的明暗是应用设置，
+  和 OS 主题可以不一致，`fcDetectTheme` 读挂载容器的背景亮度来选色板。
+- 标签栏 `position:sticky`，滚动时始终能切页。
+
+调研来源：星标最高的几个前端设计 skill（`nextlevelbuilder/ui-ux-pro-max-skill`、
+`plugin87/ux-ui-agent-skills`、`oil-oil/oil-ui`、`JimLiu/baoyu-design`）里能落到这种
+窄栏工具面板的规则 —— 可弹性重排的文本、紧凑标签不靠颜色单独表意、焦点可见、
+尊重减弱动画、token 化的间距与圆角。落地页那套（大留白、渐变、动效）没有采用，
+344 px 的密度用不上。
+
+验证：`node test-client.mjs` 全部通过（五页真实渲染 + 请求体断言）；
+`node test/smoke-host.mjs --write` 退出码 0（合并 3 段 → 调色 3 段 0 失败 →
+导出 150 帧 → 单帧 PNG 200 image/png 1472523 B → 撤销回退 effects[3,3,3]）。
+
 ## 0.3.0 — 2026-10-21
 
 **修复：插件在桌面端整条挂载失败（面板完全不工作、工具也不出现）。**

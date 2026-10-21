@@ -149,7 +149,7 @@ function ProjectsView() {
     store.detail === null ? null : h(FcSection, { title: '已打开' },
       h('div', { className: 'fc-note' },
         h('span', null, store.detail.name),
-        h('span', { style: { color: 'var(--dim)' } }, (store.detail.sequences || []).length + ' 序列 · rev ' + store.detail.revision)),
+        h('span', { style: { color: 'var(--dim)' } }, (store.detail.sequences || []).length + ' 序列' + (store.detail.revision === undefined || store.detail.revision === null ? '' : ' · rev ' + store.detail.revision))),
       h('div', { className: 'fc-path' }, store.detail.path),
       h('div', { className: 'fc-btns' },
         h(FcBtn, { onClick: function () { store.tab = 'edit'; fcEmit() } }, '进入剪辑'),

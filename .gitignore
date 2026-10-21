@@ -1,17 +1,16 @@
-node_modules/
-*.log
-npm-debug.log*
 
+# dist/ is intentionally committed: the plugin is installed straight from git
 # editor / OS
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-
 # local backups
 *.bak
 *.bak-*
+*.log
 *.orig
 *.orig-*
-
-# dist/ is intentionally committed: the plugin is installed straight from git
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db
+node_modules/
+npm-debug.log*
+preview/

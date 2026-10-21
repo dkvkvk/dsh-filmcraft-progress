@@ -1,6 +1,6 @@
 {
   "name": "dsh-filmcraft-progress",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "FilmCraft 视频剪辑/调色进度面板 + 基础剪辑 for DeepSeek Harness",
   "type": "module",
   "main": "./dist/native/index.js",
@@ -38,7 +38,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/build-native.mjs"
+    "build": "node scripts/build-native.mjs",
+    "preview": "node tools/preview.mjs && node tools/shot.mjs"
   },
   "keywords": [
     "deepseek",

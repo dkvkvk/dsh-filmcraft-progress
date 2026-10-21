@@ -212,9 +212,32 @@ node "<DSH>/resources/runtime/pnpm/bin/pnpm.cjs" install
 - **宿主端不阻塞**。编辑用 `spawnSync`（天然串行），导出和预览用异步 `spawn`。
 - **子进程输出必须写真实 fd**。宿主进程里 `spawnSync` 的 piped stdio 会 `EPERM`，
   所以日志走 `openSync(logFile,'w')` 拿到 fd 再传进去。
+- **等宽字体只用于机器文本**。路径、字节数、时间码用 mono；中文标签用系统 UI 字体。
+  0.3.0 把整个面板设成等宽 + 10px，中文看起来又挤又灰 —— 这是 0.3.1 重做样式的直接原因。
+- **配色跟随宿主，而不是操作系统**。桌面端的主题是应用设置，不是 OS 主题；
+  `fcDetectTheme` 读挂载容器的背景亮度来决定用亮色还是暗色（`prefers-color-scheme`
+  只作为读不到时的兜底）。
 - **白名单命令必须对着 `filmcraft-cli commands --json` 核过**。0.2.5 的白名单里
   33 条有 14 条是不存在的命令 id（`edit.extract`、`clip.toggleEnabled`、`marker.add`…），
   改之前先跑一遍命令表。
+
+## 改界面之前先看图
+
+面板只有 344 px 宽（右侧栏），排版错了靠读代码是看不出来的。仓库里带了一个把
+**真实组件**渲染成静态页的工具，不需要 React、不需要启动宿主：
+
+```bash
+npm run preview        # = node tools/preview.mjs && node tools/shot.mjs
+```
+
+`tools/preview.mjs` 用一套只够渲染的假 React 跑 `dist/native/client.js`，把
+`sidebar.right.pane.tab` 这一槽位按五个页签依次渲染，再把组件树序列化成 HTML
+（`preview/panel.html`）；`tools/shot.mjs` 用本机已装的 Chrome/Edge 无头模式截图到
+`preview/panel.png`。五页并排、每页 344 px，一眼能看出标签换行、文字挤在一起、
+对比度不够这类问题。
+
+它验证的是**排版和样式**，不是逻辑：交互和请求体仍然由 `node test-client.mjs` 负责。
+两个都跑才算改完。
 
 ## 重新构建
 

@@ -63,6 +63,35 @@ function usePanelFill(ref) {
   return pair[0]
 }
 
+// Which palette to paint with. prefers-color-scheme is the OS, and the desktop
+// app's own theme is a separate setting — so read the background of the surface
+// this panel was mounted into instead, and walk up to the first opaque layer.
+function fcDetectTheme(node) {
+  try {
+    if (!node || typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return 'dark'
+    // Start outside our own tree: .fc-root paints a background of its own, so
+    // reading it would just echo the palette we picked last time.
+    let element = node.parentElement
+    while (element && String(element.className || '').indexOf('fc-root') >= 0) element = element.parentElement
+    let color = ''
+    for (let depth = 0; depth < 8 && element; depth++) {
+      color = window.getComputedStyle(element).backgroundColor || ''
+      const parsed = color.match(/rgba?\(([^)]+)\)/)
+      if (parsed) {
+        const parts = parsed[1].split(',').map(Number)
+        if (parts.length < 4 || !(parts[3] < 0.5)) break
+      }
+      element = element.parentElement
+    }
+    const parsed = color.match(/rgba?\(([^)]+)\)/)
+    if (!parsed) return 'dark'
+    const parts = parsed[1].split(',').map(Number)
+    if (parts.length < 3) return 'dark'
+    const luminance = (0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]) / 255
+    return luminance > 0.5 ? 'light' : 'dark'
+  } catch (_) { return 'dark' }
+}
+
 function FcBtn(props) {
   const cls = 'fc-btn' + (props.primary ? ' primary' : '') + (props.danger ? ' danger' : '')
   return h('button', {
@@ -345,7 +374,7 @@ function ProjectBlock() {
       h(FcBtn, { disabled: busy, title: '在工作区里重新扫描 .fcproj', onClick: fcScan }, '扫描')),
 
     detail === null ? null : h('div', { className: 'fc-row' },
-      h('span', { className: 'fc-clip-t', title: detail.path }, detail.name + ' · ' + sequences.length + ' 序列 · rev ' + detail.revision),
+      h('span', { className: 'fc-clip-t', title: detail.path }, (detail.name || '未命名工程') + ' · ' + sequences.length + ' 序列' + (detail.revision === undefined || detail.revision === null ? '' : ' · rev ' + detail.revision)),
       h(FcBtn, { disabled: busy, onClick: fcRefreshProject }, '刷新')),
 
     detail === null ? null : h('div', { className: 'fc-chips' },
@@ -521,6 +550,10 @@ function Panel(props) {
     store.mounted = true
     fcBoot()
     fcEnsurePolling()
+    // The desktop app's theme is a setting, not necessarily the OS theme, so the
+    // palette is read off the surface the panel is mounted into.
+    const theme = fcDetectTheme(wrapRef.current)
+    if (theme !== store.theme) { store.theme = theme; fcEmit() }
     return function () { store.mounted = false }
   }, [])
   const wrap = 'fc-wrap' + (wide ? ' wide' : '')
@@ -531,7 +564,7 @@ function Panel(props) {
     { id: 'jobs', label: '任务' },
     { id: 'settings', label: '设置' },
   ]
-  return h('div', { className: 'fc-root' },
+  return h('div', { className: 'fc-root' + (store.theme === 'light' ? ' light' : '') },
     h('div', {
       className: wrap,
       ref: wrapRef,
@@ -549,7 +582,10 @@ function Panel(props) {
               if (tab.id === 'jobs') fcRefreshJobs().catch(function () { })
               if (tab.id === 'merge' && store.browse.path === '') fcBrowse('')
             },
-          }, tab.label + (running > 0 ? ' · ' + running : ''))
+            // The count badge is its own element: inside the label text it wrapped
+            // 「任务 · 1」 onto two lines and made the whole strip uneven.
+          }, h('span', { className: 'fc-tab-lb' }, tab.label),
+            running > 0 ? h('span', { className: 'fc-tab-n' }, String(running)) : null)
         })),
 
       store.notice ? h('div', { className: 'fc-toast' }, store.notice) : null,
