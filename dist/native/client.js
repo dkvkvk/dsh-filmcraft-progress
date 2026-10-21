@@ -13,15 +13,28 @@ window.__ModuleLoader__.load({
       },
     }
     var routes = {
-        'progress.state': ['GET', '/dsh-filmcraft-progress/api/state'],
-        'edit.projects': ['GET', '/dsh-filmcraft-progress/api/projects'],
-        'edit.open': ['POST', '/dsh-filmcraft-progress/api/open'],
-        'edit.apply': ['POST', '/dsh-filmcraft-progress/api/apply'],
-        'edit.undo': ['POST', '/dsh-filmcraft-progress/api/undo'],
-        'edit.export': ['POST', '/dsh-filmcraft-progress/api/export'],
-        'edit.frame': ['POST', '/dsh-filmcraft-progress/api/frame'],
-        'edit.proxy': ['POST', '/dsh-filmcraft-progress/api/proxy'],
-        'edit.media': ['GET', '/dsh-filmcraft-progress/api/media'],
+        'state.read': ['GET', '/dsh-filmcraft-progress/api/state'],
+        'workspace.read': ['GET', '/dsh-filmcraft-progress/api/workspace'],
+        'workspace.write': ['POST', '/dsh-filmcraft-progress/api/workspace'],
+        'projects.list': ['GET', '/dsh-filmcraft-progress/api/projects'],
+        'projects.write': ['POST', '/dsh-filmcraft-progress/api/projects'],
+        'project.read': ['GET', '/dsh-filmcraft-progress/api/project'],
+        'project.write': ['POST', '/dsh-filmcraft-progress/api/project'],
+        'assets.read': ['GET', '/dsh-filmcraft-progress/api/assets'],
+        'browse.read': ['GET', '/dsh-filmcraft-progress/api/browse'],
+        'presets.write': ['POST', '/dsh-filmcraft-progress/api/presets'],
+        'import.write': ['POST', '/dsh-filmcraft-progress/api/import'],
+        'sequence.write': ['POST', '/dsh-filmcraft-progress/api/sequence'],
+        'merge.write': ['POST', '/dsh-filmcraft-progress/api/merge'],
+        'edit.write': ['POST', '/dsh-filmcraft-progress/api/edit'],
+        'grade.write': ['POST', '/dsh-filmcraft-progress/api/grade'],
+        'undo.write': ['POST', '/dsh-filmcraft-progress/api/undo'],
+        'export.write': ['POST', '/dsh-filmcraft-progress/api/export'],
+        'jobs.read': ['GET', '/dsh-filmcraft-progress/api/jobs'],
+        'jobs.write': ['POST', '/dsh-filmcraft-progress/api/jobs'],
+        'frame.read': ['POST', '/dsh-filmcraft-progress/api/frame'],
+        'proxy.write': ['POST', '/dsh-filmcraft-progress/api/proxy'],
+        'media.read': ['GET', '/dsh-filmcraft-progress/api/media'],
       }
     var host = {
       url: function (name, params) {
@@ -47,8 +60,17 @@ window.__ModuleLoader__.load({
           init.method = 'POST'
           init.headers = { 'content-type': 'application/json' }
           init.body = JSON.stringify(arg || {})
+        } else if (arg) {
+          var qs = []
+          for (var k in arg) {
+            if (Object.prototype.hasOwnProperty.call(arg, k) && arg[k] !== undefined && arg[k] !== null) {
+              qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(arg[k]))
+            }
+          }
+          if (qs.length > 0) init.cache = 'no-store'
         }
-        var response = await fetch(route[1], init)
+        var url = route[0] === 'POST' ? route[1] : host.url(name, arg)
+        var response = await fetch(url, init)
         var value = await response.json()
         if (!response.ok) throw new Error(value && value.error ? value.error : 'request failed')
         return value
@@ -65,1115 +87,2149 @@ window.__ModuleLoader__.load({
       },
     }
     function createPlugin() {
-      // FilmCraft progress client plugin.
-      //
-      // Primary surface: a DOCKED TAB in the official right sidebar
-      // (`sidebar.right.pane.tab`) — it never covers the main UI and is opened/closed
-      // with the sidebar's own controls.
-      // Fallback (only when that sidebar service is unavailable): a non-modal,
-      // right-docked drawer with no backdrop; Esc or × closes it.
-      // Also exposed as a settings section.
-      //
-      // `React`, `styles` and `host` are injected by scripts/build-native.mjs.
-      return {
-        name: 'filmcraft-progress-client',
-        inject: ['timer'],
-        apply(ctx) {
-          const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
-          if (slots === undefined) return
-          const h = React.createElement
-      
-          const TAB_KIND = 'filmcraft-progress'
-          const TAB_ID = 'dsh-filmcraft-progress/panel'
-          const TAB_TITLE = '剪辑进度'
-      
-          // ── panel routing: official sidebar tab when available, drawer otherwise ──
-          let sidebarReady = false
-          let openPanel = function () { setDrawerOpen(true) }
-      
-          let drawerOpen = false
-          const drawerListeners = new Set()
-          function setDrawerOpen(next) {
-            drawerOpen = next
-            for (const listener of drawerListeners) listener(next)
-          }
-          function useDrawerOpen() {
-            const pair = React.useState(drawerOpen)
-            React.useEffect(function () {
-              drawerListeners.add(pair[1])
-              return function () { drawerListeners.delete(pair[1]) }
-            }, [])
-            return pair[0]
-          }
-      
-          // ── shared progress store (one poller for every surface) ──────────────────
-          const store = { state: null, error: '', listeners: new Set(), timer: null, busy: false }
-          function publish() {
-            for (const listener of store.listeners) listener({ state: store.state, error: store.error })
-          }
-          async function poll() {
-            if (store.busy) return
-            store.busy = true
-            try {
-              store.state = await host.call('progress.state', {})
-              store.error = ''
-            } catch (error) {
-              store.error = error && error.message ? error.message : String(error)
-            } finally {
-              store.busy = false
-              publish()
-            }
-          }
-          function ensurePolling() {
-            if (store.timer !== null) return
-            poll()
-            store.timer = setInterval(poll, 2000)
-          }
-          function useProgress() {
-            const pair = React.useState({ state: store.state, error: store.error })
-            React.useEffect(function () {
-              store.listeners.add(pair[1])
-              ensurePolling()
-              return function () { store.listeners.delete(pair[1]) }
-            }, [])
-            return pair[0]
-          }
-      
-          // ── styles ───────────────────────────────────────────────────────────────
-          ctx.effect(function () {
-            return styles.insert([
-              '.fc-root{--bg:#fff;--fg:#1f2328;--dim:#656d76;--line:#d0d7de;--soft:#f6f8fa;--ok:#1a7f37;--run:#9a6700;--err:#cf222e;--bar:#0969da;box-sizing:border-box;color:var(--fg);font-family:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;letter-spacing:-.01em}',
-              '@media (prefers-color-scheme:dark){.fc-root{--bg:#0d1117;--fg:#e6edf3;--dim:#8b949e;--line:#30363d;--soft:#161b22;--ok:#3fb950;--run:#d29922;--err:#f85149;--bar:#2f81f7}}',
-              '.fc-root *{box-sizing:border-box;font-family:inherit}',
-              '.fc-wrap{width:100%;padding:12px;font-size:12px;line-height:1.55}',
-              '.fc-wrap.wide{max-width:1100px;margin:0 auto;padding:20px}',
-              '.fc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}',
-              '.fc-title{margin:0;font-size:13px;font-weight:700}',
-              '.fc-wrap.wide .fc-title{font-size:15px}',
-              '.fc-sub{margin-top:3px;color:var(--dim);font-size:10px;word-break:break-word}',
-              '.fc-badge{display:inline-flex;align-items:center;gap:5px;min-height:20px;padding:2px 7px;border:1px solid var(--line);border-radius:3px;background:var(--soft);color:var(--dim);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}',
-              '.fc-badge.run{color:var(--run);border-color:var(--run)}',
-              '.fc-badge.ok{color:var(--ok);border-color:var(--ok)}',
-              '.fc-badge.err{color:var(--err);border-color:var(--err)}',
-              '.fc-dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}',
-              '.fc-badge.run .fc-dot{animation:fc-pulse 1.2s ease-in-out infinite}',
-              '@keyframes fc-pulse{0%,100%{opacity:1}50%{opacity:.25}}',
-              '.fc-bar{position:relative;height:18px;margin:12px 0 6px;border:1px solid var(--line);border-radius:4px;background:var(--soft);overflow:hidden}',
-              '.fc-bar-fill{height:100%;background:var(--bar);transition:width .6s ease}',
-              '.fc-bar-txt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}',
-              '.fc-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:10px 0}',
-              '.fc-wrap.wide .fc-stats{grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}',
-              '.fc-stat{padding:6px 8px;border:1px solid var(--line);border-radius:4px;background:var(--soft);min-width:0}',
-              '.fc-stat-k{color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-              '.fc-stat-v{margin-top:2px;font-size:12px;font-weight:700;word-break:break-all}',
-              '.fc-wrap.wide .fc-stat-v{font-size:14px}',
-              '.fc-sec{margin-top:14px}',
-              '.fc-sec-h{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:10px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}',
-              '.fc-sec-h::after{content:"";flex:1;height:1px;background:var(--line)}',
-              // Viewport-relative caps, so a short window shrinks the lists instead of
-              // pushing the sections below them out of reach.
-              '.fc-shots{display:flex;flex-direction:column;gap:3px;max-height:min(260px,30vh);overflow:auto}',
-              '.fc-wrap.wide .fc-shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:6px;max-height:none}',
-              // flex:0 0 auto is load-bearing: .fc-shots is a column flex box with a
-              // max-height, so without it every row shrinks and the text is clipped away.
-              '.fc-shot{display:flex;align-items:center;gap:6px;padding:5px 7px;border:1px solid var(--line);border-radius:3px;background:var(--soft);white-space:nowrap;overflow:hidden;flex:0 0 auto;min-height:24px}',
-              '.fc-cat{width:5px;height:5px;border-radius:50%;flex:0 0 auto}',
-              '.fc-shot-n{color:var(--dim);font-size:9px;min-width:16px;flex:0 0 auto}',
-              '.fc-shot-tag{font-weight:700;font-size:11px;flex:0 0 auto}',
-              '.fc-shot-cat{color:var(--dim);font-size:9px;flex:0 0 auto}',
-              '.fc-shot-dur{color:var(--dim);font-size:9px;flex:0 0 auto}',
-              '.fc-shot-t{color:var(--dim);font-size:9px;margin-left:auto;flex:0 0 auto}',
-              '.fc-crop{margin-left:4px;padding:0 3px;border:1px solid var(--run);border-radius:2px;color:var(--run);font-size:9px;font-weight:700;flex:0 0 auto}',
-              '.fc-st{margin-left:auto;padding:0 4px;border:1px solid var(--line);border-radius:2px;color:var(--dim);font-size:9px;font-weight:700;flex:0 0 auto}',
-              '.fc-st.done{color:var(--ok);border-color:var(--ok)}',
-              '.fc-st.exporting{color:var(--run);border-color:var(--run)}',
-              '.fc-st.failed{color:var(--err);border-color:var(--err)}',
-              '.fc-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;color:var(--dim);font-size:9px}',
-              '.fc-legend span{display:inline-flex;align-items:center;gap:4px}',
-              '.fc-pill{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;border:1px solid var(--line);border-radius:10px;color:var(--dim);font-size:9px;font-weight:700}',
-              '.fc-pill.on{color:var(--bar);border-color:var(--bar)}',
-              '.fc-table{width:100%;border-collapse:collapse;table-layout:fixed}',
-              '.fc-table th,.fc-table td{padding:4px 6px;border-bottom:1px solid var(--line);text-align:left;font-size:10px;word-break:break-word}',
-              '.fc-table th{color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.04em}',
-              '.fc-table td.k{color:var(--dim);white-space:nowrap;width:38%}',
-              '.fc-note{display:flex;gap:8px;padding:6px 8px;border-left:3px solid var(--line);background:var(--soft);margin-bottom:5px;font-size:10px}',
-              '.fc-alert{padding:10px;border:1px solid var(--err);border-radius:4px;color:var(--err);background:var(--soft);margin-top:10px;font-size:10px;word-break:break-word}',
-              '.fc-empty{padding:20px 8px;text-align:center;color:var(--dim)}',
-              '.fc-path{margin-top:10px;color:var(--dim);font-size:9px;word-break:break-all;line-height:1.5}',
-              // fallback drawer: docked right, NO backdrop — the main UI stays usable
-              '.fc-drawer{position:fixed;top:44px;right:10px;bottom:10px;z-index:1200;width:min(340px,calc(100vw - 20px));display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;background:var(--bg);box-shadow:0 8px 30px rgba(0,0,0,.28);overflow:hidden}',
-              '.fc-drawer-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--soft);flex:0 0 auto}',
-              '.fc-drawer-hd b{font-size:11px}',
-              '.fc-drawer-bd{flex:1;overflow:auto}',
-              '.fc-x{width:24px;height:24px;padding:0;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--dim);font:inherit;font-size:14px;line-height:1;cursor:pointer;flex:0 0 auto}',
-              '.fc-x:hover{color:var(--err);border-color:var(--err)}',
-              // sidebar entry
-              '.fc-entry{display:flex;align-items:center;gap:8px;width:100%;padding:6px 10px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer;text-align:left}',
-              '.fc-entry:hover{background:var(--soft)}',
-              '.fc-entry.rail{justify-content:center;padding:6px}',
-              '.fc-entry-gl{flex:0 0 auto;display:inline-flex}',
-              '.fc-entry-lb{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-              '.fc-entry-pct{margin-left:auto;color:var(--bar);font-size:10px;font-weight:700}',
-              '.fc-entry.rail .fc-entry-pct{display:none}',
-              // ── editor ──────────────────────────────────────────────────────────
-              '.fc-tabs{display:flex;gap:4px;margin:0 0 12px}',
-              '.fc-tab{flex:1;padding:6px 8px;border:1px solid var(--line);border-radius:5px;background:var(--soft);color:var(--dim);font:inherit;font-size:11px;font-weight:700;cursor:pointer}',
-              '.fc-tab.on{color:var(--bar);border-color:var(--bar);background:var(--bg)}',
-              '.fc-row{display:flex;align-items:center;gap:6px;margin-bottom:6px}',
-              '.fc-lb{color:var(--dim);font-size:10px;min-width:32px;flex:0 0 auto}',
-              '.fc-inp,.fc-sel{flex:1;min-width:0;padding:4px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font:inherit;font-size:11px}',
-              '.fc-btn{padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:var(--soft);color:var(--fg);font:inherit;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap}',
-              '.fc-btn:hover:not(:disabled){border-color:var(--bar);color:var(--bar)}',
-              '.fc-btn:disabled{opacity:.4;cursor:default}',
-              '.fc-btn.primary{border-color:var(--bar);color:var(--bar)}',
-              '.fc-btn.danger:hover:not(:disabled){border-color:var(--err);color:var(--err)}',
-              '.fc-btns{display:flex;flex-wrap:wrap;gap:4px}',
-              '.fc-clips{display:flex;flex-direction:column;gap:3px;max-height:min(230px,26vh);overflow:auto;border:1px solid var(--line);border-radius:5px;padding:4px;background:var(--soft)}',
-              '.fc-clip{display:flex;align-items:center;gap:6px;padding:5px 6px;border:1px solid transparent;border-radius:3px;cursor:pointer;flex:0 0 auto;min-height:26px;background:var(--bg)}',
-              '.fc-clip:hover{border-color:var(--line)}',
-              '.fc-clip.on{border-color:var(--bar);background:var(--soft)}',
-              '.fc-clip-n{color:var(--dim);font-size:9px;min-width:18px;flex:0 0 auto}',
-              '.fc-clip-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px}',
-              '.fc-clip-t{color:var(--dim);font-size:9px;flex:0 0 auto}',
-              '.fc-g{width:6px;height:6px;border-radius:50%;background:var(--bar);flex:0 0 auto}',
-              '.fc-g.none{background:var(--line)}',
-              // Preview: the source clips are 3840x2880, so 4:3 is their natural frame.
-              // The box must NOT be sized from the panel width — `.fc-wrap.wide` reaches
-              // 1100px and 4:3 of that is 825px tall, which pushed the clip list clean
-              // off screen (reported from a screenshot of the real panel).
-              // Height is definite and the width is derived from aspect-ratio, so the
-              // frame hugs the picture instead of spanning the panel. `width:fit-content`
-              // would not work here: the image's max-content width ignores max-height,
-              // so the container would still be stretched to max-width:100%.
-              '.fc-prev{position:relative;height:min(26vh,200px);aspect-ratio:4/3;width:auto;max-width:100%;margin:0 auto 6px;background:#000;border:1px solid var(--line);border-radius:5px;overflow:hidden;display:flex;align-items:center;justify-content:center}',
-              '.fc-prev-i,.fc-prev-v{width:100%;height:100%;object-fit:contain;display:block}',
-              '.fc-prev-none{color:var(--dim);font-size:10px;text-align:center;padding:0 8px}',
-              '.fc-prev-ov{position:absolute;right:5px;top:5px;padding:2px 6px;border-radius:3px;background:rgba(0,0,0,.65);color:#fff;font-size:9px}',
-              '.fc-fold{cursor:pointer;border:0;background:none;color:var(--dim);font:inherit;font-size:9px;font-weight:700;padding:0;letter-spacing:.05em}',
-              '.fc-fold:hover{color:var(--bar)}',
-              '.fc-range{flex:1;min-width:0;height:16px;accent-color:var(--bar)}',
-              '.fc-num{width:54px;flex:0 0 auto;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font:inherit;font-size:10px;text-align:center}',
-              '.fc-thumb{width:34px;height:20px;flex:0 0 auto;object-fit:cover;border-radius:2px;background:var(--line);display:block}',
-              '.fc-thumb-ph{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:9px}',
-              '.fc-thumb-prog{color:var(--dim);font-size:9px;font-weight:400}',
-              '.fc-toast{padding:6px 8px;border-left:3px solid var(--ok);background:var(--soft);margin:8px 0;font-size:10px;word-break:break-word}',
-              '.fc-toast.err{border-left-color:var(--err);color:var(--err)}',
-              '.fc-hint{color:var(--dim);font-size:9px;line-height:1.6;margin-top:6px}',
-            ].join(''))
-          })
-      
-          // ── helpers ──────────────────────────────────────────────────────────────
-          const CAT_COLOR = { trail: '#3fb950', sea: '#2f81f7', cat: '#d29922', neutral: '#8b949e' }
-          const CAT_LABEL = { trail: '山路', sea: '海景', cat: '猫', neutral: '中性' }
-          // Two modes, because they are genuinely different jobs:
-          //   film  — clips cut together into one timeline, so shots carry 成片 timecodes
-          //   batch — every source graded and exported on its own, so each row tracks
-          //           that file's own state instead
-          const MODE_LABEL = { film: '成片剪辑', batch: '逐段调色' }
-          const ST_LABEL = { pending: '待处理', exporting: '导出中', done: '已完成', failed: '失败' }
-          const PHASE_LABEL = {
-            idle: '待机', plan: '规划', import: '导入素材', build: '搭建时间线',
-            grade: '调色', crop: '裁剪画面', export: '导出中', done: '已完成', error: '出错',
-          }
-          function tc(sec) {
-            if (typeof sec !== 'number' || !isFinite(sec)) return '—'
-            const m = Math.floor(sec / 60)
-            const s = sec - m * 60
-            return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1)
-          }
-          function phaseClass(phase) {
-            if (phase === 'done') return 'ok'
-            if (phase === 'error') return 'err'
-            if (phase === 'idle') return ''
-            return 'run'
-          }
-          function Badge(props) {
-            return h('span', { className: 'fc-badge ' + (props.state || '') },
-              props.pulse ? h('span', { className: 'fc-dot' }) : null,
-              props.children)
-          }
-          function Stat(props) {
-            return h('div', { className: 'fc-stat' },
-              h('div', { className: 'fc-stat-k' }, props.k),
-              h('div', { className: 'fc-stat-v' }, props.v))
-          }
-      
-          // ── editor store ─────────────────────────────────────────────────────────
-          // The same four grades the batch pipeline uses, so a clip fixed by hand here
-          // matches what the pipeline would have produced.
-          const GRADE_PRESETS = {
-            sea: {
-              sharpen: 18, contrast: 26, highlights: -85, whites: -10, shadows: 22, blacks: -16, tint: -4,
-              temperature: -32, saturation: 110, vibrance: 38,
-              hsl_on: true, hsl_hue: 205, hsl_hue_range: 70, hsl_sat: 160, hsl_hue_shift: 20, hsl_temp: -35, hsl_tint: -5,
-            },
-            trail: {
-              sharpen: 20, contrast: 27, highlights: -58, whites: -6, shadows: 24, blacks: -14, tint: -4,
-              temperature: -14, saturation: 115, vibrance: 42,
-              hsl_on: true, hsl_hue: 112, hsl_hue_range: 80, hsl_sat: 110, hsl_hue_shift: 12, hsl_temp: -8, hsl_tint: -10,
-            },
-            cat: {
-              sharpen: 16, contrast: 24, highlights: -40, whites: 0, shadows: 22, blacks: -12, tint: 0,
-              temperature: 4, saturation: 114, vibrance: 36, hsl_on: false,
-            },
-            neutral: {
-              sharpen: 14, contrast: 20, highlights: -34, whites: 0, shadows: 18, blacks: -10, tint: 0,
-              temperature: -2, saturation: 108, vibrance: 26, hsl_on: false,
-            },
-          }
-          const GRADE_LABEL = { sea: '海景', trail: '山路', cat: '猫', neutral: '中性' }
-          const PRESETS = [
-            'Match Source – Adaptive High Bitrate',
-            'Match Source – Adaptive Medium Bitrate',
-            'Match Source – Adaptive Low Bitrate',
-          ]
-      
-          const ed = {
-            // Bumped on every change and handed to the useState setters. Without a
-            // changing value React sees an identical state and skips the re-render
-            // entirely — the click handlers would run but nothing would repaint.
-            version: 0,
-            view: 'progress',
-            projects: [], project: null, selected: null,
-            busy: false, toast: '', error: '',
-            out: '', preset: PRESETS[0], pickOpen: false,
-            // preview: the still of the selected clip, the scrub position inside it,
-            // per-clip thumbnails, and the optional proxy clip.
-            frame: null, frameUrl: '', frameLoading: false, frameError: '',
-            scrub: 0, thumb: {}, proxy: null, proxyUrl: '', proxyLoading: false, proxyError: '',
-            proxySeconds: 3, thumbDone: 0, thumbTotal: 0, prevOpen: true,
-            listeners: new Set(),
-          }
-          function edSet(patch) {
-            for (const k of Object.keys(patch)) ed[k] = patch[k]
-            ed.version += 1
-            for (const l of ed.listeners) l(ed.version)
-          }
-          function useEditor() {
-            const pair = React.useState(0)
-            React.useEffect(function () {
-              const set = pair[1]
-              ed.listeners.add(set)
-              // Re-sync in case this component mounted after an edit already landed.
-              set(ed.version)
-              return function () { ed.listeners.delete(set) }
-            }, [])
-            return ed
-          }
-          function errText(e) { return e && e.message ? e.message : String(e) }
-          function shortName(n) {
-            // DJI names are DJI_<timestamp>_<seq>_D.MP4 — drop only the prefix, keep
-            // the sequence number so clips stay tellable apart.
-            const s = String(n || '').replace(/^DJI_\d+_/i, '').replace(/\.MP4$/i, '')
-            return s.length > 22 ? s.slice(0, 21) + '…' : s
-          }
-          function selClip() {
-            const p = ed.project
-            if (!p) return null
-            for (const c of p.clips) if (c.clip === ed.selected) return c
-            return null
-          }
-          function defaultOut(kind) {
-            const p = ed.project
-            if (!p) return ''
-            const dir = p.path.replace(/[^\\/]+$/, '')
-            const stem = p.name || 'export'
-            return dir + (kind === 'clip' && selClip() ? shortName(selClip().name) : stem) + '_调色.mp4'
-          }
-      
-          // ── preview: stills, thumbnails, short proxy clips ───────────────────────
-          // `render` costs ~1.2 s per frame (decode-bound, nearly independent of
-          // --scale), so the host caches every result by project mtime and the client
-          // keeps a monotonically increasing token: a slow frame arriving after a
-          // newer request is dropped instead of repainting over it.
-          let frameToken = 0
-          let scrubTimer = null
-          let thumbBusy = false
-          const thumbQueue = []
-      
-          function blobUrl(blob) {
-            if (typeof URL !== 'undefined' && URL.createObjectURL) return URL.createObjectURL(blob)
-            return ''
-          }
-          function dropUrl(u) {
-            if (!u) return
-            try { if (typeof URL !== 'undefined' && URL.revokeObjectURL) URL.revokeObjectURL(u) } catch (_) { }
-          }
-      
-          // Only one frame render runs at a time; requests arriving while it is in
-          // flight are coalesced down to the newest.  Without this, dragging the
-          // scrubber queues a 1.2 s render for every intermediate position.
-          let frameBusy = false
-          let framePending = null
-      
-          async function edLoadFrame(seconds) {
-            const p = ed.project
-            if (!p) return
-            if (frameBusy) { framePending = seconds; return }
-            frameBusy = true
-            try {
-              let want = seconds
-              while (want !== null) {
-                framePending = null
-                const token = ++frameToken
-                edSet({ frameLoading: true, frameError: '' })
-                try {
-                  const r = await host.call('edit.frame', { project: p.path, seconds: want, scale: 0.25 })
-                  const blob = await host.blob('edit.media', { name: r.name })
-                  if (token === frameToken) {
-                    const old = ed.frameUrl
-                    edSet({ frame: r, frameUrl: blobUrl(blob), frameLoading: false, frameError: '' })
-                    dropUrl(old)
-                  }
-                } catch (e) {
-                  if (token === frameToken) edSet({ frameLoading: false, frameError: errText(e) })
-                }
-                want = framePending
-              }
-            } finally {
-              frameBusy = false
-            }
-          }
-      
-          function edScrub(v) {
-            edSet({ scrub: v })
-            if (scrubTimer !== null) clearTimeout(scrubTimer)
-            // Collapsed preview means nobody is looking — don't burn a render per step.
-            if (!ed.prevOpen) return
-            // Debounced: dragging the slider must not queue one 1.2 s render per pixel.
-            scrubTimer = setTimeout(function () {
-              const c = selClip()
-              if (c === null) return
-              edLoadFrame(c.start + ed.scrub)
-            }, 420)
-          }
-      
-          function edSelectClip(c) {
-            dropUrl(ed.proxyUrl)
-            edSet({
-              selected: c.clip, out: '', scrub: c.dur / 2,
-              proxy: null, proxyUrl: '', proxyError: '', frameUrl: '', frame: null,
-            })
-            edLoadFrame(c.start + c.dur / 2)
-          }
-      
-          // Re-render the current still after the project changed.  The host keys its
-          // cache on the project's mtime, so an edit automatically misses the cache.
-          function edRefreshFrame() {
-            const c = selClip()
-            if (c === null) return
-            const t = Math.min(ed.scrub, Math.max(0, c.dur - 0.001))
-            edSet({ scrub: t })
-            edLoadFrame(c.start + t)
-            // Only the edited clip's thumbnail is stale — the others were not touched
-            // and re-rendering all 33 would cost ~45 s for nothing.  Drop the entry so
-            // the pump renders it again against the new mtime.
-            const key = ed.project.path + '#' + c.clip
-            delete ed.thumb[key]
-            let queued = false
-            for (const job of thumbQueue) if (job.key === key) queued = true
-            if (!queued) {
-              thumbQueue.push({ key: key, project: ed.project.path, seconds: c.start + c.dur / 2 })
-              ed.thumbTotal += 1
-            }
-            edSet({})
-            thumbPump()
-          }
-      
-          async function thumbPump() {
-            if (thumbBusy) return
-            thumbBusy = true
-            while (thumbQueue.length > 0) {
-              const job = thumbQueue.shift()
-              if (ed.thumb[job.key] && ed.thumb[job.key].state === 'ok') { ed.thumbDone += 1; continue }
-              ed.thumb[job.key] = { state: 'loading' }
-              edSet({})
-              try {
-                const r = await host.call('edit.frame', { project: job.project, seconds: job.seconds, scale: 0.1 })
-                const blob = await host.blob('edit.media', { name: r.name })
-                ed.thumb[job.key] = { state: 'ok', url: blobUrl(blob) }
-              } catch (e) {
-                ed.thumb[job.key] = { state: 'err', error: errText(e) }
-              }
-              ed.thumbDone += 1
-              edSet({})
-            }
-            thumbBusy = false
-          }
-      
-          // Thumbnails fill in one at a time in the background: 33 clips fired at once
-          // would be a ~45 s burst and the panel would look frozen.
-          function edQueueThumbs() {
-            const p = ed.project
-            if (!p) return
-            thumbQueue.length = 0
-            for (const c of p.clips) {
-              const key = p.path + '#' + c.clip
-              if (ed.thumb[key] && ed.thumb[key].state === 'ok') continue
-              thumbQueue.push({ key: key, project: p.path, seconds: c.start + c.dur / 2 })
-            }
-            ed.thumbDone = 0
-            ed.thumbTotal = thumbQueue.length
-            edSet({})
-            thumbPump()
-          }
-      
-          // A fixed 2/3/5/10 menu never fits: the useful length is usually "this much of
-          // this clip". So the length is a free number instead, bounded by what the host
-          // will actually render (PROXY_MAX_SECONDS there is 20).
-          const PROXY_MAX = 20
-          function proxySpan() {
-            const v = Number(ed.proxySeconds)
-            if (!Number.isFinite(v) || v <= 0) return 3
-            return Math.min(PROXY_MAX, Math.max(0.5, Math.round(v * 10) / 10))
-          }
-      
-          async function edMakeProxy() {
-            const p = ed.project
-            const c = selClip()
-            if (!p || c === null) return
-            const span = proxySpan()
-            if (span !== ed.proxySeconds) edSet({ proxySeconds: span })
-            const start = c.start + ed.scrub
-            const end = Math.min(c.start + c.dur, start + span)
-            if (end - start < 0.2) { edSet({ proxyError: '这个位置往后不足 0.2 秒，把时间轴往前拖一点再试' }); return }
-            edSet({ proxyLoading: true, proxyError: '', proxy: null })
-            try {
-              const r = await host.call('edit.proxy', { project: p.path, start: start, end: end, scale: 0.25, quality: 60 })
-              const blob = await host.blob('edit.media', { name: r.name })
-              const old = ed.proxyUrl
-              edSet({ proxy: r, proxyUrl: blobUrl(blob), proxyLoading: false, proxyError: '' })
-              dropUrl(old)
-            } catch (e) {
-              edSet({ proxyLoading: false, proxyError: errText(e) })
-            }
-          }
-      
-          // The whole clip, capped at what the host will render.
-          function edProxyWholeClip() {
-            const c = selClip()
-            if (c === null) return
-            edSet({ proxySeconds: Math.min(PROXY_MAX, Math.max(0.5, Math.round(c.dur * 10) / 10)), scrub: 0 })
-            edRefreshFrame()
-          }
-      
-          async function edProjects() {
-            edSet({ busy: true, error: '', toast: '' })
-            try {
-              const r = await host.call('edit.projects', {})
-              edSet({ projects: r.projects || [], busy: false, pickOpen: true, toast: '扫描到 ' + (r.projects || []).length + ' 个工程' })
-            } catch (e) { edSet({ busy: false, error: errText(e) }) }
-          }
-          async function edOpen(path) {
-            edSet({
-              busy: true, error: '', toast: '', pickOpen: false, selected: null,
-              frame: null, frameUrl: '', frameLoading: false, frameError: '',
-              proxy: null, proxyUrl: '', proxyError: '', thumb: {},
-            })
-            try {
-              const r = await host.call('edit.open', { path: path })
-              edSet({
-                project: r, selected: r.clips.length ? r.clips[0].clip : null,
-                busy: false, out: '', toast: '已打开 ' + r.name + ' · ' + r.clipCount + ' 段 · ' + tc(r.duration),
-              })
-              // Preview and thumbnails follow whatever project was just opened.
-              edQueueThumbs()
-              if (r.clips.length) edSelectClip(r.clips[0])
-            } catch (e) { edSet({ busy: false, error: errText(e) }) }
-          }
-          async function edApply(commands, label) {
-            const p = ed.project
-            if (!p) return
-            const keep = ed.selected
-            edSet({ busy: true, error: '', toast: '' })
-            try {
-              const r = await host.call('edit.apply', { project: p.path, commands: commands })
-              const re = await host.call('edit.open', { path: p.path })
-              let sel = keep
-              let found = false
-              for (const c of re.clips) if (c.clip === keep) found = true
-              if (!found) sel = re.clips.length ? re.clips[0].clip : null
-              edSet({
-                project: re, selected: sel, busy: false,
-                toast: (r.ok ? '✅ ' : '⚠️ ') + label + ' · ' + r.applied + ' 步' +
-                  (r.failed ? ' · 失败 ' + r.failed : '') + ' · 可撤销 ' + (r.undoDepth || 0) + ' 步',
-              })
-              edRefreshFrame()
-            } catch (e) { edSet({ busy: false, error: errText(e) }) }
-          }
-          async function edUndo() {
-            const p = ed.project
-            if (!p) return
-            edSet({ busy: true, error: '', toast: '' })
-            try {
-              const r = await host.call('edit.undo', { project: p.path })
-              const re = await host.call('edit.open', { path: p.path })
-              edSet({ project: re, busy: false, toast: '↩ 已撤销，剩余 ' + (r.remaining || 0) + ' 步可撤销' })
-              edRefreshFrame()
-            } catch (e) { edSet({ busy: false, error: errText(e) }) }
-          }
-          async function edExport(kind) {
-            const p = ed.project
-            if (!p) return
-            const clip = selClip()
-            if (kind === 'clip' && clip === null) return
-            const out = ed.out || defaultOut(kind)
-            const body = { project: p.path, out: out, preset: ed.preset }
-            if (kind === 'clip') { body.start = clip.start; body.end = clip.end }
-            edSet({ busy: true, error: '', toast: '' })
-            try {
-              const r = await host.call('edit.export', body)
-              edSet({ busy: false, out: out, toast: '🎬 已开始后台导出（PID ' + r.pid + '）→ ' + out })
-            } catch (e) { edSet({ busy: false, error: errText(e) }) }
-          }
-      
-          function Btn(props) {
-            return h('button', {
-              className: 'fc-btn' + (props.kind ? ' ' + props.kind : ''),
-              type: 'button',
-              disabled: !!props.disabled,
-              title: props.title || undefined,
-              onClick: props.onClick,
-            }, props.children)
-          }
-      
-          // ── the editor: open a project, pick a clip, make a basic cut ────────────
-          function EditPanel() {
-            const s = useEditor()
-            const p = s.project
-            const clip = selClip()
-            const T = 254016000000
-            const busy = s.busy
-      
-            function trim(edge, deltaSec) {
-              if (clip === null) return
-              edApply(
-                [{ id: 'timeline.trim', params: { clip: clip.clip, edge: edge, mode: 'ripple', delta: Math.round(deltaSec * T) } }],
-                (edge === 'in' ? '裁头' : '裁尾') + ' ' + (deltaSec > 0 ? '+' : '') + deltaSec + 's')
-            }
-            function del() {
-              if (clip === null) return
-              edApply([{ id: 'edit.rippleDelete', params: { clips: [clip.clip] } }], '删除并合拢')
-            }
-            function move(dir) {
-              if (clip === null) return
-              const i = p.clips.indexOf(clip)
-              const j = dir < 0 ? i - 1 : i + 1
-              if (j < 0 || j >= p.clips.length) return
-              // swap the two clips by moving each to the other's start time
-              const other = p.clips[j]
-              edApply([
-                { id: 'timeline.move', params: { moves: [{ clip: clip.clip, track: 'V1', time: Math.round(other.start * T) }] } },
-                { id: 'timeline.move', params: { moves: [{ clip: other.clip, track: 'V1', time: Math.round(clip.start * T) }] } },
-              ], dir < 0 ? '上移' : '下移')
-            }
-            function grade(name) {
-              if (clip === null) return
-              const preset = GRADE_PRESETS[name]
-              if (!preset) return
-              const cmds = []
-              if (clip.grade === null || clip.grade === undefined) {
-                cmds.push({ id: 'effects.apply', params: { clips: [clip.clip], effect: 'lumetri' } })
-              }
-              const target = clip.grade ? clip.grade.index : 'lumetri'
-              for (const k of Object.keys(preset)) {
-                cmds.push({ id: 'effects.setParam', params: { clip: clip.clip, effect: target, param: k, value: preset[k] } })
-              }
-              edApply(cmds, '套用「' + GRADE_LABEL[name] + '」调色')
-            }
-            function clearGrade() {
-              if (clip === null || !clip.grade) return
-              edApply([{ id: 'effects.reset', params: { clip: clip.clip, index: clip.grade.index } }], '清空调色')
-            }
-            function toggleEnable() {
-              if (clip === null) return
-              edApply([{ id: 'clip.enable', params: { clips: [clip.clip] } }], clip.enabled ? '停用片段' : '启用片段')
-            }
-      
-            return h('div', null,
-              h('div', { className: 'fc-row' },
-                h('span', { className: 'fc-lb' }, '工程'),
-                h('button', { className: 'fc-btn', type: 'button', disabled: busy, onClick: edProjects }, '扫描'),
-                p ? h('span', { className: 'fc-clip-t', title: p.path }, p.name + ' · ' + p.clipCount + ' 段') : null),
-      
-              s.pickOpen && s.projects.length ? h('div', { className: 'fc-clips', style: { maxHeight: '150px', marginBottom: '8px' } },
-                s.projects.map(function (proj) {
-                  return h('div', {
-                    className: 'fc-clip' + (p && p.path === proj.path ? ' on' : ''), key: proj.path,
-                    title: proj.path, onClick: function () { edOpen(proj.path) },
-                  },
-                    h('span', { className: 'fc-clip-name' }, proj.name),
-                    h('span', { className: 'fc-clip-t' }, Math.round(proj.size / 1024) + 'KB'))
-                })) : null,
-      
-              s.toast ? h('div', { className: 'fc-toast' }, s.toast) : null,
-              s.error ? h('div', { className: 'fc-toast err' }, s.error) : null,
-      
-              p === null ? h('div', { className: 'fc-hint' },
-                '点「扫描」找出 D 盘里的 .fcproj 工程，选一个就能在这里剪。',
-                h('br'), '支持：预览画面、裁头/裁尾、删除、上下移、套调色、启停用、撤销、导出。') : h('div', null,
-      
-                h('div', { className: 'fc-sec' },
-                  h('div', { className: 'fc-sec-h' },
-                    '预览' + (clip === null ? '' : ' · #' + (p.clips.indexOf(clip) + 1) + ' ' + shortName(clip.name)),
-                    h('button', {
-                      className: 'fc-fold', type: 'button',
-                      title: s.prevOpen ? '收起画面，给片段列表腾地方' : '展开画面',
-                      onClick: function () { edSet({ prevOpen: !s.prevOpen }) },
-                    }, s.prevOpen ? '收起画面' : '展开画面')),
-      
-                  s.prevOpen ? h('div', { className: 'fc-prev' },
-                    s.proxyUrl
-                      ? h('video', { className: 'fc-prev-v', src: s.proxyUrl, controls: true, autoPlay: true, loop: true, playsInline: true })
-                      : (s.frameUrl
-                        ? h('img', { className: 'fc-prev-i', src: s.frameUrl, alt: '预览画面' })
-                        : h('div', { className: 'fc-prev-none' },
-                          s.frameLoading ? '渲染中…' : (clip === null ? '选一个片段' : '准备中…'))),
-                    s.frameLoading && s.frameUrl ? h('div', { className: 'fc-prev-ov' }, '渲染中…') : null) : null,
-      
-                  clip === null ? null : h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '时间'),
-                    h(Btn, {
-                      disabled: busy || s.frameLoading, title: '往前 0.5 秒',
-                      onClick: function () { edScrub(Math.max(0, s.scrub - 0.5)) },
-                    }, '◀'),
-                    h('input', {
-                      className: 'fc-range', type: 'range', min: 0, max: Math.max(0.001, clip.dur), step: 0.05,
-                      value: s.scrub, onChange: function (e) { edScrub(Number(e.target.value)) },
-                    }),
-                    h(Btn, {
-                      disabled: busy || s.frameLoading, title: '往后 0.5 秒',
-                      onClick: function () { edScrub(Math.min(clip.dur, s.scrub + 0.5)) },
-                    }, '▶'),
-                    h('span', { className: 'fc-clip-t' }, s.scrub.toFixed(2) + ' / ' + clip.dur.toFixed(2) + 's')),
-      
-                  clip === null ? null : h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '视频'),
-                    h('input', {
-                      className: 'fc-num', type: 'number', min: 0.5, max: PROXY_MAX, step: 0.5,
-                      value: String(s.proxySeconds),
-                      title: '预览片段长度，0.5 – ' + PROXY_MAX + ' 秒',
-                      onChange: function (e) { edSet({ proxySeconds: e.target.value }) },
-                      // Typing "1" on the way to "15" must not be clamped mid-keystroke.
-                      onBlur: function () { edSet({ proxySeconds: proxySpan() }) },
-                    }),
-                    h('span', { className: 'fc-clip-t' }, '秒'),
-                    h('button', {
-                      className: 'fc-fold', type: 'button', title: '从头预览整段（最长 ' + PROXY_MAX + ' 秒）',
-                      onClick: edProxyWholeClip,
-                    }, '整段'),
-                    h(Btn, { disabled: busy || s.proxyLoading, onClick: edMakeProxy }, s.proxyLoading ? '导出中…' : '生成预览片段'),
-                    s.proxyUrl ? h(Btn, {
-                      onClick: function () { dropUrl(ed.proxyUrl); edSet({ proxy: null, proxyUrl: '' }) },
-                    }, '关闭视频') : null),
-      
-                  s.frameError ? h('div', { className: 'fc-toast err' }, s.frameError) : null,
-                  s.proxyError ? h('div', { className: 'fc-toast err' }, s.proxyError) : null,
-                  s.prevOpen ? h('div', { className: 'fc-hint' },
-                    '画面是套过调色的成片效果。拖动时间轴看任意一帧；',
-                    '「生成预览片段」渲染真实视频，长度自己填（0.5–' + PROXY_MAX + ' 秒），约 0.13 秒/帧（' +
-                    proxySpan() + ' 秒 ≈ ' + Math.max(1, Math.round(proxySpan() * 50 * 0.13)) + ' 秒），结果会缓存。') : null),
-      
-                h('div', { className: 'fc-sec' },
-                  h('div', { className: 'fc-sec-h' },
-                    '片段 (' + p.clipCount + ') · ' + tc(p.duration),
-                    s.thumbTotal > 0 && s.thumbDone < s.thumbTotal
-                      ? h('span', { className: 'fc-thumb-prog' }, ' · 缩略图 ' + s.thumbDone + '/' + s.thumbTotal)
-                      : null),
-                  h('div', { className: 'fc-clips' }, p.clips.map(function (c, i) {
-                    const th = s.thumb[p.path + '#' + c.clip]
-                    return h('div', {
-                      className: 'fc-clip' + (c.clip === s.selected ? ' on' : ''), key: c.clip,
-                      title: c.name + '\n时长 ' + c.dur.toFixed(2) + 's · 源入点 ' + c.sourceIn.toFixed(2) + 's' +
-                        (c.grade ? '\n已调色：对比 ' + c.grade.contrast + ' / 饱和 ' + c.grade.saturation + ' / 色温 ' + c.grade.temperature : '\n未调色'),
-                      onClick: function () { edSelectClip(c) },
-                    },
-                      th && th.state === 'ok'
-                        ? h('img', { className: 'fc-thumb', src: th.url, alt: '' })
-                        : h('span', { className: 'fc-thumb fc-thumb-ph' },
-                          th && th.state === 'loading' ? '…' : (th && th.state === 'err' ? '×' : '')),
-                      h('span', { className: 'fc-g' + (c.grade ? '' : ' none') }),
-                      h('span', { className: 'fc-clip-n' }, '#' + (i + 1)),
-                      h('span', { className: 'fc-clip-name', style: c.enabled ? null : { opacity: 0.45 } }, shortName(c.name)),
-                      h('span', { className: 'fc-clip-t' }, c.dur.toFixed(2) + 's'))
-                  }))),
-      
-                clip === null ? null : h('div', { className: 'fc-sec' },
-                  h('div', { className: 'fc-sec-h' }, '编辑 #' + (p.clips.indexOf(clip) + 1) + ' · ' + clip.dur.toFixed(2) + 's'),
-      
-                  h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '裁头'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('in', -0.5) }, title: '把入点往左拉 0.5 秒（变长）' }, '−0.5s'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('in', 0.5) }, title: '裁掉开头 0.5 秒' }, '+0.5s'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('in', 1) } }, '+1s'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('in', 3) } }, '+3s')),
-      
-                  h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '裁尾'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('out', -0.5) } }, '−0.5s'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('out', 0.5) }, title: '裁掉结尾 0.5 秒' }, '+0.5s'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('out', 1) } }, '+1s'),
-                    h(Btn, { disabled: busy, onClick: function () { trim('out', 3) } }, '+3s')),
-      
-                  h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '排序'),
-                    h(Btn, { disabled: busy || p.clips.indexOf(clip) === 0, onClick: function () { move(-1) } }, '◀ 上移'),
-                    h(Btn, { disabled: busy || p.clips.indexOf(clip) === p.clipCount - 1, onClick: function () { move(1) } }, '下移 ▶'),
-                    h(Btn, { kind: 'danger', disabled: busy, onClick: del }, '删除')),
-      
-                  h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '调色'),
-                    h(Btn, { disabled: busy, onClick: function () { grade('sea') } }, '海景'),
-                    h(Btn, { disabled: busy, onClick: function () { grade('trail') } }, '山路'),
-                    h(Btn, { disabled: busy, onClick: function () { grade('cat') } }, '猫'),
-                    h(Btn, { disabled: busy, onClick: function () { grade('neutral') } }, '中性'),
-                    h(Btn, { disabled: busy || !clip.grade, onClick: clearGrade }, '清空')),
-      
-                  h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '其他'),
-                    h(Btn, { disabled: busy, onClick: toggleEnable }, clip.enabled ? '停用' : '启用'),
-                    h(Btn, { disabled: busy, onClick: edUndo, title: '还原到上一次编辑前的工程快照' }, '↩ 撤销'))),
-      
-                h('div', { className: 'fc-sec' },
-                  h('div', { className: 'fc-sec-h' }, '导出'),
-                  h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '输出'),
-                    h('input', {
-                      className: 'fc-inp', type: 'text', value: s.out || defaultOut('clip'),
-                      onChange: function (e) { edSet({ out: e.target.value }) },
-                    })),
-                  h('div', { className: 'fc-row' },
-                    h('span', { className: 'fc-lb' }, '预设'),
-                    h('select', {
-                      className: 'fc-sel', value: s.preset,
-                      onChange: function (e) { edSet({ preset: e.target.value }) },
-                    }, PRESETS.map(function (name) { return h('option', { value: name, key: name }, name) }))),
-                  h('div', { className: 'fc-btns' },
-                    h(Btn, { kind: 'primary', disabled: busy || clip === null, onClick: function () { edExport('clip') } }, '导出选中片段'),
-                    h(Btn, { disabled: busy, onClick: function () { edExport('all') } }, '导出整条序列')),
-                  h('div', { className: 'fc-hint' },
-                    '导出在后台跑，可在「进度」页看实时百分比。'))))
-          }
-      
-          // ── panel body (shared by the sidebar tab / drawer / settings page) ───────
-          function ProgressView(props) {
-            const wide = !!(props && props.wide)
-            const snap = useProgress()
-            const st = snap.state
-            const wrap = 'fc-wrap' + (wide ? ' wide' : '')
-      
-            if (snap.error && st === null) {
-              return h('div', { className: 'fc-alert' }, '无法读取进度：' + snap.error)
-            }
-            if (st === null) {
-              return h('div', { className: 'fc-empty' }, '正在连接…')
-            }
-            if (!st.ok) {
-              return h('div', null,
-                h('div', { className: 'fc-head' },
-                  h('div', null,
-                    h('h2', { className: 'fc-title' }, 'FilmCraft 剪辑进度'),
-                    h('div', { className: 'fc-sub' }, '等待任务开始')),
-                  h(Badge, { state: '' }, '待机')),
-                h('div', { className: 'fc-empty' }, '当前没有进行中的剪辑任务'),
-                h('div', { className: 'fc-path' }, '进度文件：' + st.statusPath),
-                st.error ? h('div', { className: 'fc-alert' }, st.error) : null)
-            }
-      
-            const pct = st.percent
-            const video = st.video || {}
-            const tl = st.timeline || {}
-            const shots = st.shots || []
-            const grades = st.grades || {}
-            const notes = st.notes || []
-      
-            return h('div', null,
-              h('div', { className: 'fc-head' },
-                h('div', { style: { minWidth: 0 } },
-                  h('h2', { className: 'fc-title' }, st.project || 'FilmCraft 剪辑进度'),
-                  h('div', { className: 'fc-sub' },
-                    [MODE_LABEL[st.mode] || '',
-                      video.width && video.height ? video.width + '×' + video.height : '',
-                      video.fps ? video.fps + 'fps' : '',
-                      shots.length ? (st.mode === 'batch' ? shots.length + ' 段素材' : shots.length + ' 个镜头') : '']
-                      .filter(Boolean).join(' · '))),
-                h(Badge, { state: phaseClass(st.phase), pulse: st.running },
-                  st.phaseLabel || PHASE_LABEL[st.phase] || st.phase)),
-      
-              pct === null ? null : h('div', null,
-                h('div', { className: 'fc-bar' },
-                  h('div', { className: 'fc-bar-fill', style: { width: Math.min(100, pct) + '%' } }),
-                  h('div', { className: 'fc-bar-txt' }, pct.toFixed(1) + '%')),
-                h('div', { className: 'fc-sub' },
-                  (st.percentBasis === 'bytes' ? '按输出文件大小估算' : '按耗时估算') +
-                  (st.message ? ' · ' + st.message : ''))),
-      
-              h('div', { className: 'fc-stats' },
-                h(Stat, { k: '已用时', v: st.elapsedText }),
-                h(Stat, { k: '预计剩余', v: st.etaText }),
-                h(Stat, { k: '写入速度', v: st.export.rateText }),
-                h(Stat, { k: '输出大小', v: st.export.bytesText })),
-      
-              shots.length ? h('div', { className: 'fc-sec' },
-                h('div', { className: 'fc-sec-h' },
-                  (st.mode === 'batch' ? '片段表' : '分镜表') + ' (' + shots.length + ')' +
-                  (MODE_LABEL[st.mode] ? ' · ' + MODE_LABEL[st.mode] : '')),
-                h('div', { className: 'fc-shots' }, shots.map(function (s, i) {
-                  const isBatch = st.mode === 'batch'
-                  const head = (CAT_LABEL[s.cat] || s.cat || '')
-                  const title = isBatch
-                    ? head + ' · 源 ' + s.tag + ' · ' + (s.dur || 0).toFixed(1) + 's' + (s.fps ? ' @ ' + s.fps + 'fps' : '') +
-                      ' · ' + (ST_LABEL[s.status] || '待处理')
-                    : head + ' · 源 ' + s.tag + ' · 成片 ' + tc(s.start) + ' · ' + (s.dur || 0).toFixed(1) + 's'
-                  return h('div', { className: 'fc-shot', key: i, title: title },
-                    h('span', { className: 'fc-cat', style: { background: CAT_COLOR[s.cat] || '#888' } }),
-                    h('span', { className: 'fc-shot-n' }, '#' + (s.n || i + 1)),
-                    h('span', { className: 'fc-shot-tag' }, s.tag),
-                    isBatch ? h('span', { className: 'fc-shot-cat' }, head) : null,
-                    isBatch
-                      ? h('span', { className: 'fc-shot-dur' }, (s.dur || 0).toFixed(1) + 's')
-                      : (s.crop ? h('span', { className: 'fc-crop' }, '裁') : null),
-                    isBatch
-                      ? h('span', { className: 'fc-st ' + (s.status || 'pending') }, ST_LABEL[s.status] || '待处理')
-                      : h('span', { className: 'fc-shot-t' }, tc(s.start)))
-                })),
-                st.mode === 'batch' ? h('div', { className: 'fc-legend' },
-                  h('span', null, h('span', { className: 'fc-cat', style: { background: CAT_COLOR.sea } }), '海景'),
-                  h('span', null, h('span', { className: 'fc-cat', style: { background: CAT_COLOR.trail } }), '山路'),
-                  h('span', null, h('span', { className: 'fc-cat', style: { background: CAT_COLOR.cat } }), '猫'),
-                  h('span', null, h('span', { className: 'fc-cat', style: { background: CAT_COLOR.neutral } }), '中性'),
-                  h('span', null, Object.keys(st.stats || {}).map(function (k) { return (CAT_LABEL[k] || k) + ' ' + st.stats[k] }).join(' / '))) : null) : null,
-      
-              (tl.width || video.codec) ? h('div', { className: 'fc-sec' },
-                h('div', { className: 'fc-sec-h' }, st.mode === 'batch' ? '素材与输出规格' : '成片规格'),
-                h('table', { className: 'fc-table' }, h('tbody', null,
-                  h('tr', null, h('td', { className: 'k' }, '分辨率'),
-                    h('td', null, (tl.width || video.width || '?') + '×' + (tl.height || video.height || '?'))),
-                  h('tr', null, h('td', { className: 'k' }, '帧率'), h('td', null, (tl.fps || video.fps || '?') + ' fps')),
-                  tl.durationSeconds ? h('tr', null, h('td', { className: 'k' }, '总时长'),
-                    h('td', null, tc(tl.durationSeconds))) : null,
-                  tl.shotCount ? h('tr', null, h('td', { className: 'k' }, '镜头数'), h('td', null, String(tl.shotCount))) : null,
-                  st.stats ? h('tr', null, h('td', { className: 'k' }, '分类'),
-                    h('td', null, Object.keys(st.stats).map(function (k) {
-                      return (CAT_LABEL[k] || k) + ' ' + st.stats[k]
-                    }).join(' · '))) : null,
-                  video.codec ? h('tr', null, h('td', { className: 'k' }, '编码'),
-                    h('td', null, video.codec + (video.bitrateMbps ? ' ' + video.bitrateMbps + 'M' : ''))) : null))) : null,
-      
-              Object.keys(grades).length ? h('div', { className: 'fc-sec' },
-                h('div', { className: 'fc-sec-h' }, '调色参数'),
-                h('table', { className: 'fc-table' },
-                  h('thead', null, h('tr', null, h('th', null, '分类'), h('th', null, '参数'))),
-                  h('tbody', null, Object.keys(grades).map(function (cat) {
-                    const g = grades[cat] || {}
-                    return h('tr', { key: cat },
-                      h('td', { className: 'k' }, CAT_LABEL[cat] || cat),
-                      h('td', null, Object.keys(g).map(function (k) { return k + ' ' + g[k] }).join(' · ')))
-                  })))) : null,
-      
-              notes.length ? h('div', { className: 'fc-sec' },
-                h('div', { className: 'fc-sec-h' }, '备注'),
-                notes.map(function (n, i) { return h('div', { className: 'fc-note', key: i }, h('span', null, n)) })) : null,
-      
-              st.error ? h('div', { className: 'fc-alert' }, st.error) : null,
-      
-              h('div', { className: 'fc-path' },
-                '输出 ' + (st.export.path || '—') +
-                ' · 刷新于 ' + new Date(st.now).toLocaleTimeString('zh-CN')))
-          }
-      
-          // ── top-level panel: progress view / editor, one docked tab ──────────────
-          // The host's sidebar pane body does not scroll on its own, so the panel caps
-          // itself at what is left of the viewport and scrolls inside. Without this the
-          // last sections (「导出」) sit below the window and are unreachable — reported
-          // from a screenshot where 导出 was cut off at the bottom edge.
-          // Measuring beats a magic offset: the pane's top moves with the app header,
-          // the tab strip and any resize of the sidebar.
-          function usePanelFill(ref) {
-            const pair = React.useState(0)
-            const setH = pair[1]
-            React.useEffect(function () {
-              let last = -1
-              function measure() {
-                const el = ref.current
-                if (el === null || el === undefined) return
-                if (typeof el.getBoundingClientRect !== 'function') return
-                const viewport = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 0
-                if (!viewport) return
-                const top = el.getBoundingClientRect().top
-                const h = Math.max(220, Math.round(viewport - top - 10))
-                // Guard the setter: an unchanged value would re-render forever once a
-                // ResizeObserver is watching the element we are resizing.
-                if (h !== last) { last = h; setH(h) }
-              }
-              measure()
-              if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('resize', measure)
-              let ro = null
-              if (typeof ResizeObserver !== 'undefined' && ref.current) {
-                ro = new ResizeObserver(measure)
-                ro.observe(ref.current)
-              }
-              return function () {
-                if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('resize', measure)
-                if (ro !== null) ro.disconnect()
-              }
-            }, [])
-            return pair[0]
-          }
-      
-          function Panel(props) {
-            const wide = !!(props && props.wide)
-            const s = useEditor()
-            const wrapRef = React.useRef(null)
-            const fillH = usePanelFill(wrapRef)
-            const wrap = 'fc-wrap' + (wide ? ' wide' : '')
-            function pick(view) {
-              edSet({ view: view })
-              if (view === 'edit' && ed.project === null && ed.projects.length === 0) edProjects()
-            }
-            return h('div', { className: 'fc-root' }, h('div', {
-              className: wrap,
-              ref: wrapRef,
-              style: fillH > 0 ? { maxHeight: fillH + 'px', overflowY: 'auto' } : null,
-            },
-              h('div', { className: 'fc-tabs' },
-                h('button', {
-                  className: 'fc-tab' + (s.view === 'progress' ? ' on' : ''), type: 'button',
-                  onClick: function () { pick('progress') },
-                }, '进度'),
-                h('button', {
-                  className: 'fc-tab' + (s.view === 'edit' ? ' on' : ''), type: 'button',
-                  onClick: function () { pick('edit') },
-                }, '剪辑')),
-              s.view === 'edit' ? h(EditPanel, null) : h(ProgressView, { wide: wide })))
-          }
-      
-          // ── fallback drawer (non-modal, no backdrop) ──────────────────────────────
-          function Drawer() {
-            const open = useDrawerOpen()
-            React.useEffect(function () {
-              if (!open) return
-              function onKey(e) { if (e.key === 'Escape') setDrawerOpen(false) }
-              window.addEventListener('keydown', onKey)
-              return function () { window.removeEventListener('keydown', onKey) }
-            }, [open])
-            if (!open) return null
-            return h('div', { className: 'fc-root' }, h('div', { className: 'fc-drawer', role: 'complementary' },
-              h('div', { className: 'fc-drawer-hd' },
-                h('b', null, TAB_TITLE),
-                h('button', {
-                  className: 'fc-x', type: 'button', title: '关闭 (Esc)',
-                  onClick: function () { setDrawerOpen(false) },
-                }, '×')),
-              h('div', { className: 'fc-drawer-bd' }, h(Panel, null))))
-          }
-      
-          // ── right-sidebar tab install (the official, non-covering surface) ────────
-          const ICON = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.6" y="3" width="12.8" height="10" rx="2"/><path d="M6.2 6.4l3.4 1.6-3.4 1.6z"/></svg>'
-          function TabIcon() {
-            return h('span', { style: { display: 'inline-flex' }, dangerouslySetInnerHTML: { __html: ICON } })
-          }
-      
-          ctx.effect(function () {
-            if (typeof slots.inject !== 'function') return function () { }
-            return slots.inject('sidebar.right.pane.tab', function () {
-              let disposed = false
-              let poll = 0
-              let off = null
-      
-              function attempt() {
-                if (disposed) return
-                // The seat is declared before the service is ready, so poll briefly.
-                const tabs = typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : undefined
-                const ctrl = typeof ctx.get === 'function' ? ctx.get('sidebarRight') : undefined
-                if (!tabs || typeof tabs.register !== 'function' || !ctrl || typeof ctrl.openTab !== 'function') {
-                  poll = setTimeout(attempt, 300)
-                  return
-                }
-                let disposeTabs = null
-                let disposeBody = null
-                try {
-                  disposeTabs = tabs.register({
-                    id: TAB_ID,
-                    kind: TAB_KIND,
-                    keepMounted: true,
-                    title: function () { return TAB_TITLE },
-                    guide: [{
-                      id: 'progress',
-                      order: 120,
-                      title: function () { return TAB_TITLE },
-                      description: function () { return 'FilmCraft 剪辑与调色进度' },
-                      icon: TabIcon,
-                    }],
-                  })
-                  disposeBody = slots.register(
-                    { name: 'sidebar.right.pane.tab', key: TAB_ID },
-                    function () { return h(Panel, null) },
-                  )
-                } catch (_) {
-                  // id clash or shape mismatch: stay on the drawer fallback
-                  try { if (disposeTabs) disposeTabs() } catch (e) { }
-                  try { if (disposeBody) disposeBody() } catch (e) { }
-                  return
-                }
-                sidebarReady = true
-                openPanel = function () { try { ctrl.openTab(TAB_KIND) } catch (_) { setDrawerOpen(true) } }
-                off = function () {
-                  try { disposeBody() } catch (e) { }
-                  try { disposeTabs() } catch (e) { }
-                  sidebarReady = false
-                  openPanel = function () { setDrawerOpen(true) }
-                }
-              }
-      
-              attempt()
-              return function () {
-                disposed = true
-                if (poll) clearTimeout(poll)
-                if (off) off()
-              }
-            })
-          })
-      
-          // ── sidebar footer entry: opens the docked tab ───────────────────────────
-          function FooterAction(props) {
-            const wide = !(props && props.wide === false)
-            const snap = useProgress()
-            const st = snap.state
-            const running = !!(st && st.ok && st.running)
-            const pct = st && st.ok && st.percent !== null && st.percent !== undefined ? st.percent : null
-            return h('button', {
-              className: wide ? 'fc-entry' : 'fc-entry rail',
-              type: 'button',
-              title: running && pct !== null ? '剪辑进行中 ' + pct.toFixed(0) + '%' : TAB_TITLE,
-              onClick: function () { openPanel() },
-            },
-              h('span', { className: 'fc-entry-gl', dangerouslySetInnerHTML: { __html: ICON } }),
-              wide ? h('span', { className: 'fc-entry-lb' }, TAB_TITLE) : null,
-              running && pct !== null && wide ? h('span', { className: 'fc-entry-pct' }, pct.toFixed(0) + '%') : null)
-          }
-      
-          // ── register ─────────────────────────────────────────────────────────────
-          slots.inject('settings.section', function () {
-            return slots.register(
-              { name: 'settings.section', id: 'filmcraft-progress', order: 13, label: TAB_TITLE },
-              function () { return h(Panel, { wide: true }) })
-          })
-          // Mount point for the fallback drawer. It renders nothing whenever the
-          // official right-sidebar tab registered successfully — so in the normal
-          // case this plugin never draws anything over the main UI.
-          slots.inject('shell.overlay', function () {
-            return slots.register(
-              { name: 'shell.overlay', id: 'filmcraft-progress', order: 6, label: TAB_TITLE },
-              function () { return sidebarReady ? null : h(Drawer, null) })
-          })
-          slots.inject('sidebar.footer.action', function () {
-            return slots.register(
-              { name: 'sidebar.footer.action', id: 'filmcraft-progress', order: 91, label: TAB_TITLE },
-              FooterAction)
-          })
-        },
+    // ── 00-setup.js ──────────────────────────────────────────────────
+    // ── setup ───────────────────────────────────────────────────────────────────
+    // Entry point of the client half.
+    //
+    // `React`, `styles` and `host` are injected by scripts/build-native.mjs: every
+    // module in src/client is concatenated into one `createPlugin()` body, so the
+    // body must end by returning the plugin object (see 99-plugin.js) and nothing at
+    // module top level may touch `ctx` — it does not exist there. That mistake is
+    // what made the previous build fail the whole web boot with
+    // "dsh-filmcraft-progress: import failed: ctx is not defined".
+    //
+    // The panel is a docked tab in the official right sidebar. The drawer is only a
+    // fallback for a host that does not expose the sidebar services (or where the tab
+    // id is already taken) — without it the panel would be unreachable.
+
+    const h = React.createElement
+
+    let sidebarReady = false
+    let openTab = null
+    let drawerOpen = false
+    const drawerListeners = new Set()
+
+    function setDrawerOpen(next) {
+      drawerOpen = next
+      const list = Array.from(drawerListeners)
+      for (const listener of list) listener(next)
+    }
+
+    function useDrawerOpen() {
+      const pair = React.useState(drawerOpen)
+      React.useEffect(function () {
+        drawerListeners.add(pair[1])
+        return function () { drawerListeners.delete(pair[1]) }
+      }, [])
+      return pair[0]
+    }
+
+    function openPanel() {
+      if (openTab !== null) {
+        try { openTab(); return } catch (_) { }
       }
+      setDrawerOpen(true)
+    }
+
+    function apply(ctx) {
+      const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
+      if (slots === undefined) return
+
+      ctx.effect(function () { return styles.insert(fcCss()) })
+
+      // The seat is declared before the sidebar services are ready, so poll briefly
+      // instead of assuming the order.
+      ctx.effect(function () {
+        if (typeof slots.inject !== 'function') return function () { }
+        return slots.inject('sidebar.right.pane.tab', function () {
+          let disposed = false
+          let poll = 0
+          let off = null
+
+          function attempt() {
+            if (disposed) return
+            const tabs = typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : undefined
+            const ctrl = typeof ctx.get === 'function' ? ctx.get('sidebarRight') : undefined
+            if (!tabs || typeof tabs.register !== 'function' || !ctrl || typeof ctrl.openTab !== 'function') {
+              poll = setTimeout(attempt, 300)
+              return
+            }
+            let disposeTabs = null
+            let disposeBody = null
+            try {
+              disposeTabs = tabs.register({
+                id: FC_TAB_ID,
+                kind: FC_TAB_KIND,
+                keepMounted: true,
+                title: function () { return FC_TAB_TITLE },
+                guide: [{
+                  id: 'filmcraft',
+                  order: 120,
+                  title: function () { return FC_TAB_TITLE },
+                  description: function () { return 'FilmCraft 剪辑、调色与导出' },
+                  icon: FcIcon,
+                }],
+              })
+              disposeBody = slots.register(
+                { name: 'sidebar.right.pane.tab', key: FC_TAB_ID },
+                function () { return h(Panel, null) },
+              )
+            } catch (_) {
+              try { if (disposeTabs) disposeTabs() } catch (e) { }
+              try { if (disposeBody) disposeBody() } catch (e) { }
+              return
+            }
+            sidebarReady = true
+            openTab = function () {
+              try { ctrl.openTab(FC_TAB_KIND) } catch (_) { setDrawerOpen(true) }
+            }
+            off = function () {
+              try { disposeBody() } catch (e) { }
+              try { disposeTabs() } catch (e) { }
+              sidebarReady = false
+              openTab = null
+            }
+          }
+
+          attempt()
+          return function () {
+            disposed = true
+            if (poll) clearTimeout(poll)
+            if (off) off()
+          }
+        })
+      })
+
+      slots.inject('settings.section', function () {
+        return slots.register(
+          { name: 'settings.section', id: 'filmcraft-progress', order: 13, label: FC_TAB_TITLE },
+          function () { return h(Panel, { wide: true }) })
+      })
+
+      // Mount point for the fallback drawer. It renders nothing when the official
+      // tab registered, so the normal case never draws over the main UI.
+      slots.inject('shell.overlay', function () {
+        return slots.register(
+          { name: 'shell.overlay', id: 'filmcraft-progress', order: 6, label: FC_TAB_TITLE },
+          function () { return sidebarReady ? null : h(Drawer, null) })
+      })
+
+      slots.inject('sidebar.footer.action', function () {
+        return slots.register(
+          { name: 'sidebar.footer.action', id: 'filmcraft-progress', order: 91, label: FC_TAB_TITLE },
+          FooterAction)
+      })
+    }
+
+    // ── 10-store.js ──────────────────────────────────────────────────
+    // ── store ───────────────────────────────────────────────────────────────────
+    // One store for the whole client half: the panel, the footer status and the
+    // fallback drawer all read it. It holds no React state, so every action below is
+    // testable without a renderer — `fcEmit()` is the only bridge to the views.
+    //
+    // The server is the source of truth. Nothing here caches a project or a job:
+    // each mutation returns the fresh detail (the host re-reads it), and the store
+    // just adopts it. That is what keeps the panel honest after an edit — there is
+    // no second copy of the timeline to drift out of date.
+    
+    const TICKS = 254016000000
+    const PROXY_MAX = 20
+    
+    const store = {
+      booted: false,
+      mounted: false,
+      workspace: null,
+      projects: [],
+      detail: null,
+      projectId: '',
+      jobs: [],
+      legacy: null,
+      tab: 'projects',
+      clipId: null,
+      scrub: 0,
+      frameUrl: '',
+      frameError: '',
+      frameBusy: false,
+      frameQueued: null,
+      proxyUrl: '',
+      proxyError: '',
+      proxyBusy: false,
+      proxySeconds: 3,
+      prevOpen: true,
+      out: '',
+      format: 'h264',
+      scale: 1,
+      busy: '',
+      error: '',
+      notice: '',
+      version: 0,
+      listeners: new Set(),
+      pollTimer: null,
+      scrubTimer: null,
+      noticeTimer: null,
+    }
+    
+    function fcEmit() {
+      store.version += 1
+      const list = Array.from(store.listeners)
+      for (const listener of list) {
+        try { listener() } catch (_) { }
+      }
+    }
+    
+    function fcErr(error) {
+      return error && error.message ? error.message : String(error)
+    }
+    
+    function fcNotice(text) {
+      store.notice = String(text || '')
+      if (store.noticeTimer !== null) clearTimeout(store.noticeTimer)
+      store.noticeTimer = setTimeout(function () {
+        store.noticeTimer = null
+        store.notice = ''
+        fcEmit()
+      }, 2600)
+      fcEmit()
+    }
+    
+    // ── formatting ──────────────────────────────────────────────────────────────
+    function fcPad(n) { return String(n).padStart(2, '0') }
+    function fcTime(sec) {
+      if (typeof sec !== 'number' || !isFinite(sec) || sec < 0) return '—'
+      const total = Math.round(sec * 10) / 10
+      const minutes = Math.floor(total / 60)
+      const rest = total - minutes * 60
+      return minutes + ':' + (rest < 10 ? '0' : '') + rest.toFixed(1)
+    }
+    function fcSeconds(sec) {
+      if (typeof sec !== 'number' || !isFinite(sec) || sec < 0) return '—'
+      return sec.toFixed(1) + 's'
+    }
+    function fcBytes(bytes) {
+      const value = Number(bytes) || 0
+      if (value <= 0) return '0 B'
+      if (value < 1024) return value + ' B'
+      if (value < 1048576) return (value / 1024).toFixed(1) + ' KB'
+      if (value < 1073741824) return (value / 1048576).toFixed(1) + ' MB'
+      return (value / 1073741824).toFixed(2) + ' GB'
+    }
+    function fcDuration(ms) {
+      const total = Math.max(0, Math.round((Number(ms) || 0) / 1000))
+      if (total < 60) return total + 's'
+      const minutes = Math.floor(total / 60)
+      const rest = total % 60
+      if (minutes < 60) return minutes + 'm' + fcPad(rest) + 's'
+      return Math.floor(minutes / 60) + 'h' + fcPad(minutes % 60) + 'm'
+    }
+    function fcAgo(iso) {
+      const ms = Date.parse(iso)
+      if (!isFinite(ms)) return ''
+      const delta = Math.max(0, Date.now() - ms)
+      if (delta < 60000) return Math.round(delta / 1000) + ' 秒前'
+      if (delta < 3600000) return Math.round(delta / 60000) + ' 分钟前'
+      if (delta < 86400000) return Math.round(delta / 3600000) + ' 小时前'
+      return Math.round(delta / 86400000) + ' 天前'
+    }
+    // File names are the only thing that identifies two takes of the same shot, and
+    // the panel column is ~30 characters wide, so keep the head and the tail.
+    function fcShort(name, limit) {
+      const text = String(name || '')
+      const max = limit || 34
+      if (text.length <= max) return text
+      const keep = Math.floor((max - 1) / 2)
+      return text.slice(0, keep) + '…' + text.slice(text.length - (max - keep - 1))
+    }
+    
+    // ── lookups ─────────────────────────────────────────────────────────────────
+    function fcProjectRef() {
+      if (store.projectId) return store.projectId
+      return store.detail ? store.detail.path : ''
+    }
+    function fcSequence() {
+      return store.detail && store.detail.sequence ? store.detail.sequence : null
+    }
+    function fcClips() {
+      const sequence = fcSequence()
+      if (!sequence) return []
+      return sequence.clips.filter(function (clip) { return clip.kind === 'video' })
+    }
+    function fcSelectedClip() {
+      const clips = fcClips()
+      for (const clip of clips) if (clip.clip === store.clipId) return clip
+      return null
+    }
+    function fcPreset(id) {
+      const presets = store.workspace && Array.isArray(store.workspace.presets) ? store.workspace.presets : []
+      for (const preset of presets) if (preset.id === id) return preset
+      return null
+    }
+    // The engine's colour effect is called `lumetri`; the presets are only parameter
+    // values on it. "Has a grade" therefore means "carries that effect", not "carries
+    // one of our four recipes".
+    function fcHasGrade(clip) {
+      if (!clip || !Array.isArray(clip.effects)) return false
+      for (const effect of clip.effects) {
+        if (String(effect.effect).toLowerCase() === 'lumetri') return true
+      }
+      return false
+    }
+    function fcRunningJobs() {
+      return store.jobs.filter(function (job) { return job.state === 'running' })
+    }
+    
+    // ── request helper ──────────────────────────────────────────────────────────
+    // Every write goes through here so there is exactly one place that clears the
+    // previous error, one place that formats a failure, and one busy flag the views
+    // can disable buttons with.
+    async function fcRun(label, fn) {
+      store.busy = label || ''
+      store.error = ''
+      fcEmit()
+      try {
+        return await fn()
+      } catch (error) {
+        store.error = (label ? label + '：' : '') + fcErr(error)
+        return null
+      } finally {
+        store.busy = ''
+        fcEmit()
+      }
+    }
+    
+    // ── data ────────────────────────────────────────────────────────────────────
+    async function fcRefreshJobs() {
+      const result = await host.call('jobs.read', {})
+      store.jobs = result && Array.isArray(result.jobs) ? result.jobs : []
+      fcEmit()
+    }
+    
+    async function fcBoot() {
+      if (store.booted) return
+      store.booted = true
+      await fcRun('加载工作区', async function () {
+        store.workspace = await host.call('workspace.read', {})
+        const list = await host.call('projects.list', {})
+        store.projects = list && Array.isArray(list.projects) ? list.projects : []
+      })
+      try { store.legacy = await host.call('state.read', {}) } catch (_) { store.legacy = null }
+      try { await fcRefreshJobs() } catch (_) { }
+      fcEmit()
+    }
+    
+    function fcDropUrls() {
+      if (store.frameUrl) { try { URL.revokeObjectURL(store.frameUrl) } catch (_) { } }
+      if (store.proxyUrl) { try { URL.revokeObjectURL(store.proxyUrl) } catch (_) { } }
+      store.frameUrl = ''
+      store.proxyUrl = ''
+    }
+    
+    function fcSetDetail(detail, options) {
+      const keep = !!(options && options.keep)
+      fcDropUrls()
+      store.detail = detail || null
+      store.projectId = detail && detail.projectId ? detail.projectId : ''
+      if (!keep) store.scrub = 0
+      // Clip ids are only meaningful inside one project, so a multi-select carried
+      // across a project switch would silently point at the wrong clips.
+      store.multi = []
+      const clips = fcClips()
+      let found = false
+      for (const clip of clips) if (clip.clip === store.clipId) found = true
+      if (!found) store.clipId = clips.length > 0 ? clips[0].clip : null
+      fcEmit()
+      // Every detail read is a chance that the picture changed (an edit, a sequence
+      // switch, a different project). Refreshing it here keeps the preview honest
+      // without the views needing to watch mtimes.
+      if (store.prevOpen) {
+        const clip = fcSelectedClip()
+        if (clip && store.detail && store.detail.sequence) fcFrame(clip.start + store.scrub)
+      }
+    }
+    
+    async function fcOpenProject(id) {
+      if (!id) return
+      const detail = await fcRun('打开工程', function () {
+        return host.call('project.read', { project: id })
+      })
+      if (detail) {
+        fcSetDetail(detail)
+        fcNotice('已打开「' + (detail.name || detail.projectName || '') + '」')
+        fcRefreshAssets().catch(function () { })
+      }
+    }
+    
+    async function fcRefreshProject() {
+      if (!store.detail) return
+      const detail = await fcRun('刷新工程', function () {
+        return host.call('project.read', { project: store.detail.path, force: true })
+      })
+      if (detail) fcSetDetail(detail, { keep: true })
+    }
+    
+    async function fcScan() {
+      const result = await fcRun('扫描工程', function () {
+        return host.call('projects.list', { rescan: true })
+      })
+      if (!result) return
+      store.projects = result.projects || []
+      const found = Array.isArray(result.scanned) ? result.scanned.length : 0
+      fcNotice('扫描到 ' + found + ' 个工程文件，列表里 ' + store.projects.length + ' 个')
+    }
+    
+    async function fcNewSequence() {
+      if (!store.detail) return
+      const sequence = fcSequence()
+      const body = {
+        action: 'create',
+        project: fcProjectRef(),
+        name: '序列 ' + (store.detail.sequences ? store.detail.sequences.length + 1 : 1),
+        width: sequence && sequence.width ? sequence.width : 1920,
+        height: sequence && sequence.height ? sequence.height : 1080,
+        fps: sequence && sequence.fps ? sequence.fps : 23.976,
+      }
+      const result = await fcRun('新建序列', function () {
+        return host.call('sequence.write', body)
+      })
+      if (result && result.detail) fcSetDetail(result.detail)
+      if (result) fcNotice('已新建序列')
+    }
+    
+    async function fcActivateSequence(id) {
+      if (!store.detail) return
+      const result = await fcRun('切换序列', function () {
+        return host.call('project.write', { action: 'activate', project: fcProjectRef(), sequence: id })
+      })
+      if (result && result.detail) fcSetDetail(result.detail)
+    }
+    
+    // ── editing ─────────────────────────────────────────────────────────────────
+    async function fcEdit(commands, label) {
+      const result = await fcRun(label, function () {
+        return host.call('edit.write', { project: fcProjectRef(), commands: commands })
+      })
+      if (!result) return null
+      if (result.detail) fcSetDetail(result.detail, { keep: true })
+      const failed = Array.isArray(result.failed) ? result.failed : []
+      if (failed.length > 0) {
+        store.error = label + '失败：' + failed[0].error
+        fcEmit()
+      } else {
+        fcNotice(label + '完成')
+      }
+      return result
+    }
+    
+    function fcTrim(edge, deltaSec) {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      const delta = Math.round(deltaSec * TICKS)
+      fcEdit([{ id: 'timeline.trim', params: { clip: clip.clip, edge: edge, mode: 'ripple', delta: delta } }],
+        (edge === 'in' ? '裁头 ' : '裁尾 ') + (deltaSec > 0 ? '+' : '') + deltaSec + 's ')
+    }
+    
+    function fcDeleteClip() {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      fcEdit([{ id: 'edit.rippleDelete', params: { clips: [clip.clip] } }], '删除片段 ')
+    }
+    
+    function fcMoveClip(dir) {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      const clips = fcClips()
+      const index = clips.indexOf(clip)
+      const next = clips[dir < 0 ? index - 1 : index + 1]
+      if (!next) return
+      // Swap by moving each clip to the other's start time. Two commands, one
+      // snapshot: the host treats the batch as a single undo step.
+      fcEdit([
+        { id: 'timeline.move', params: { moves: [{ clip: clip.clip, track: clip.track, time: Math.round(next.start * TICKS) }] } },
+        { id: 'timeline.move', params: { moves: [{ clip: next.clip, track: next.track, time: Math.round(clip.start * TICKS) }] } },
+      ], dir < 0 ? '上移 ' : '下移 ')
+    }
+    
+    function fcToggleClip() {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      fcEdit([{ id: 'clip.enable', params: { clips: [clip.clip] } }], clip.enabled ? '停用片段 ' : '启用片段 ')
+    }
+    
+    async function fcApplyGrade(presetId) {
+      const clip = fcSelectedClip()
+      if (!clip || !presetId) return
+      const preset = fcPreset(presetId)
+      const result = await fcRun('套用调色', function () {
+        return host.call('grade.write', { project: fcProjectRef(), clips: [clip.clip], preset: presetId })
+      })
+      if (!result) return
+      if (result.detail) fcSetDetail(result.detail, { keep: true })
+      const failed = Array.isArray(result.failed) ? result.failed : []
+      if (failed.length > 0) {
+        store.error = '套用调色失败：' + failed[0].error
+        fcEmit()
+        return
+      }
+      fcNotice('已套用「' + (preset ? preset.name : presetId) + '」')
+    }
+    
+    async function fcClearGrade() {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      const result = await fcRun('清空调色', function () {
+        return host.call('grade.write', { project: fcProjectRef(), clips: [clip.clip], clear: true })
+      })
+      if (result && result.detail) fcSetDetail(result.detail, { keep: true })
+      if (result) fcNotice('已清空调色')
+    }
+    
+    async function fcUndo() {
+      if (!store.detail) return
+      const result = await fcRun('撤销', function () {
+        return host.call('undo.write', { project: fcProjectRef() })
+      })
+      if (result && result.detail) {
+        fcSetDetail(result.detail, { keep: true })
+        fcNotice('已撤销一步')
+      }
+    }
+    
+    // ── preview ─────────────────────────────────────────────────────────────────
+    async function fcFrame(seconds) {
+      if (!store.detail || !fcSequence()) return
+      if (store.frameBusy) { store.frameQueued = seconds; return }
+      store.frameBusy = true
+      store.frameError = ''
+      fcEmit()
+      try {
+        const result = await host.call('frame.read', { project: fcProjectRef(), seconds: seconds, scale: 0.25 })
+        const blob = await host.blob('media.read', { name: result.name })
+        const url = URL.createObjectURL(blob)
+        if (store.frameUrl) { try { URL.revokeObjectURL(store.frameUrl) } catch (_) { } }
+        store.frameUrl = url
+      } catch (error) {
+        store.frameError = fcErr(error)
+      } finally {
+        store.frameBusy = false
+        fcEmit()
+        if (store.frameQueued !== null) {
+          const next = store.frameQueued
+          store.frameQueued = null
+          fcFrame(next)
+        }
+      }
+    }
+    
+    // Scrubbing should not spawn one render process per pixel. 400 ms after the last
+    // move is slow enough to coalesce a drag and fast enough to feel immediate.
+    function fcScrub(seconds) {
+      store.scrub = Math.max(0, Number(seconds) || 0)
+      fcEmit()
+      if (!store.prevOpen) return
+      if (store.scrubTimer !== null) clearTimeout(store.scrubTimer)
+      store.scrubTimer = setTimeout(function () {
+        store.scrubTimer = null
+        const clip = fcSelectedClip()
+        if (clip) fcFrame(clip.start + store.scrub)
+      }, 400)
+    }
+    
+    async function fcProxy() {
+      const clip = fcSelectedClip()
+      if (!clip || store.proxyBusy) return
+      const span = Math.max(0.5, Math.min(store.proxySeconds, PROXY_MAX, clip.dur - store.scrub))
+      store.proxyBusy = true
+      store.proxyError = ''
+      fcEmit()
+      try {
+        const result = await host.call('proxy.write', {
+          project: fcProjectRef(),
+          start: clip.start + store.scrub,
+          seconds: span,
+          scale: 0.5,
+          quality: 60,
+        })
+        const blob = await host.blob('media.read', { name: result.name })
+        const url = URL.createObjectURL(blob)
+        if (store.proxyUrl) { try { URL.revokeObjectURL(store.proxyUrl) } catch (_) { } }
+        store.proxyUrl = url
+        fcNotice('预览片段已生成（' + span.toFixed(1) + 's）')
+      } catch (error) {
+        store.proxyError = fcErr(error)
+      } finally {
+        store.proxyBusy = false
+        fcEmit()
+      }
+    }
+    
+    function fcWholeClip() {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      store.proxySeconds = Math.max(0.5, Math.min(clip.dur, PROXY_MAX))
+      fcScrub(0)
+      fcEmit()
+    }
+    
+    // ── export ──────────────────────────────────────────────────────────────────
+    async function fcExport() {
+      if (!store.detail) return
+      const body = { project: fcProjectRef(), format: store.format, scale: store.scale }
+      if (store.detail.activeSequence !== null && store.detail.activeSequence !== undefined) body.sequence = store.detail.activeSequence
+      if (store.out) body.out = store.out
+      const result = await fcRun('开始导出', function () {
+        return host.call('export.write', body)
+      })
+      if (!result || !result.job) return
+      store.tab = 'jobs'
+      fcNotice('导出已开始')
+      try { await fcRefreshJobs() } catch (_) { }
+      fcEmit()
+    }
+    
+    async function fcJobAction(action, id) {
+      const result = await fcRun(action === 'cancel' ? '取消任务' : '移除任务', function () {
+        return host.call('jobs.write', { action: action, id: id })
+      })
+      if (!result) return
+      try { await fcRefreshJobs() } catch (_) { }
+    }
+    
+    // Polling exists only while a job is in flight: the host samples the output file
+    // on read, so there is nothing to gain from asking when nothing is running.
+    function fcEnsurePolling() {
+      if (store.pollTimer !== null) return
+      store.pollTimer = setInterval(function () {
+        if (!store.mounted) return
+        if (fcRunningJobs().length === 0) return
+        fcRefreshJobs().catch(function () { })
+      }, 1500)
+    }
+    
+    function fcSet(patch) {
+      for (const key of Object.keys(patch)) store[key] = patch[key]
+      fcEmit()
+    }
+
+    // ── 15-actions.js ────────────────────────────────────────────────
+    // ── actions: projects, media, merge, presets, settings ──────────────────────
+    // Second layer of the store. 10-store.js covers "one open project, one selected
+    // clip"; this module covers everything that needs to look across projects or
+    // create one — which is what makes the panel usable for more than the single
+    // project it was originally written for.
+    //
+    // Every action follows the fcRun convention: one busy label, one error slot, and
+    // a notice on success, so the views never manage their own loading state.
+    
+    Object.assign(store, {
+      // A directory listing for the media picker. Kept separate from `assets`
+      // because browsing is a filesystem view and assets is a project view.
+      browse: { path: '', parent: '', dirs: [], files: [], projects: [] },
+      browseOpen: false,
+      // Media currently staged for merge or import (absolute paths, in chosen order).
+      staging: [],
+      multi: [],
+      merge: {
+        name: '',
+        createName: '',
+        createDir: '',
+        exportAfter: false,
+        settings: null,
+        compat: null,
+        result: null,
+        tabs: 'staging',
+      },
+      settings: { root: '', cliPath: '', scanDepth: 4, open: false },
+      assets: [],
+      presets: [],
+    })
+    
+    // fcErr() only formats a thrown value; it does not touch the store. Validation
+    // failures need the error slot filled, so they go through this instead.
+    function fcFail(text) {
+      store.error = String(text || '')
+      fcEmit()
+    }
+    
+    function fcStagingIndex(path) {
+      for (let i = 0; i < store.staging.length; i += 1) if (store.staging[i] === path) return i
+      return -1
+    }
+    
+    function fcStage(path) {
+      if (!path) return
+      if (fcStagingIndex(path) >= 0) { fcNotice('已经在待合并列表里'); return }
+      store.staging.push(path)
+      fcEmit()
+    }
+    
+    function fcUnstage(path) {
+      store.staging = store.staging.filter(function (entry) { return entry !== path })
+      fcEmit()
+    }
+    
+    function fcUnstageAll() {
+      store.staging = []
+      fcEmit()
+    }
+    
+    // Reordering is the whole point of a merge UI, so both directions are explicit
+    // rather than a drag handle — the panel is too narrow for reliable dragging.
+    function fcStageMove(path, dir) {
+      const index = fcStagingIndex(path)
+      const next = index + (dir < 0 ? -1 : 1)
+      if (index < 0 || next < 0 || next >= store.staging.length) return
+      const list = store.staging.slice()
+      const swapped = list[index]
+      list[index] = list[next]
+      list[next] = swapped
+      store.staging = list
+      fcEmit()
+    }
+    
+    // ── browse ──────────────────────────────────────────────────────────────────
+    async function fcBrowse(path) {
+      const result = await fcRun('读取目录', function () {
+        return host.call('browse.read', { path: path || store.browse.path || '' })
+      })
+      if (!result) return
+      store.browse = {
+        path: result.path || '',
+        parent: result.parent || '',
+        dirs: Array.isArray(result.dirs) ? result.dirs : [],
+        files: Array.isArray(result.files) ? result.files : [],
+        projects: Array.isArray(result.projects) ? result.projects : [],
+      }
+      store.browseOpen = true
+      fcEmit()
+    }
+    
+    function fcBrowseUp() {
+      if (store.browse.parent) fcBrowse(store.browse.parent)
+    }
+    
+    // ── project registry (multi-project) ────────────────────────────────────────
+    async function fcProjectAdd(file, name) {
+      const body = { action: 'add', file: file }
+      if (name) body.name = name
+      const result = await fcRun('登记工程', function () {
+        return host.call('projects.write', body)
+      })
+      if (!result) return null
+      store.projects = result.projects || store.projects
+      fcNotice('已登记 ' + (result.project ? result.project.name : file))
+      if (result.project) await fcOpenProject(result.project.id)
+      return result
+    }
+    
+    async function fcProjectRemove(id) {
+      const result = await fcRun('移除工程', function () {
+        return host.call('projects.write', { action: 'remove', project: id })
+      })
+      if (!result) return
+      store.projects = result.projects || []
+      if (store.detail && store.projectId === id) fcSetDetail(null)
+      fcNotice('已从列表移除（文件本身没动）')
+    }
+    
+    async function fcProjectRename(id, name) {
+      if (!name) return
+      const result = await fcRun('重命名工程', function () {
+        return host.call('projects.write', { action: 'rename', project: id, name: name })
+      })
+      if (!result) return
+      store.projects = result.projects || []
+      fcNotice('已重命名')
+    }
+    
+    async function fcRescan() {
+      const result = await fcRun('重新扫描', function () {
+        return host.call('projects.write', { action: 'rescan' })
+      })
+      if (!result) return
+      store.projects = result.projects || []
+      const found = Array.isArray(result.scanned) ? result.scanned.length : 0
+      fcNotice('扫描到 ' + found + ' 个 .fcproj')
+    }
+    
+    async function fcProjectCreate(file, name) {
+      // A project cannot be created out of nothing by this engine: the CLI refuses a
+      // path that does not exist yet. `--empty import … --save-as` is the documented
+      // way to make one, so creating a project is always "create + import".
+      const result = await fcRun('新建工程', function () {
+        return host.call('projects.write', { action: 'add', file: file, name: name, create: true })
+      })
+      if (!result) return null
+      store.projects = result.projects || store.projects
+      if (result.project) await fcOpenProject(result.project.id)
+      return result
+    }
+    
+    // ── media ───────────────────────────────────────────────────────────────────
+    async function fcRefreshAssets() {
+      if (!store.detail) return
+      const result = await fcRun('读取素材', function () {
+        return host.call('assets.read', { project: fcProjectRef() })
+      })
+      if (!result) return
+      store.assets = Array.isArray(result.assets) ? result.assets : []
+      fcEmit()
+    }
+    
+    // Importing adds files to the project bin without touching the timeline. Placing
+    // them is a separate intent, so it stays a separate button.
+    async function fcImport(files) {
+      const list = (files || store.staging).slice()
+      if (list.length === 0) { fcFail('请先选素材'); return null }
+      if (!store.detail) { fcFail('先打开一个工程'); return null }
+      const result = await fcRun('导入素材 ' + list.length + ' 个', function () {
+        return host.call('import.write', { project: fcProjectRef(), files: list })
+      })
+      if (!result) return null
+      if (result.detail) fcSetDetail(result.detail, { keep: true })
+      else await fcRefreshAssets()
+      const errors = Array.isArray(result.errors) ? result.errors : []
+      if (errors.length > 0) {
+        store.error = '部分导入失败：' + (errors[0].error || errors[0])
+        fcEmit()
+      } else {
+        fcNotice('已导入 ' + list.length + ' 个素材')
+      }
+      return result
+    }
+    
+    async function fcPlaceStaging(options) {
+      const list = (options && options.files ? options.files : store.staging).slice()
+      if (list.length === 0) { fcFail('请先选素材'); return null }
+      if (!store.detail) { fcFail('先打开一个工程'); return null }
+      const sequence = fcSequence()
+      const body = {
+        project: fcProjectRef(),
+        files: list,
+        place: true,
+        insert: options && options.insert === true,
+        name: (options && options.name) || '序列 ' + ((store.detail.sequences || []).length + 1),
+        width: sequence && sequence.width ? sequence.width : 1920,
+        height: sequence && sequence.height ? sequence.height : 1080,
+        fps: sequence && sequence.fps ? sequence.fps : 25,
+      }
+      const result = await fcRun('放置 ' + list.length + ' 段', function () {
+        return host.call('import.write', body)
+      })
+      if (!result) return null
+      if (result.detail) fcSetDetail(result.detail)
+      fcNotice('已按顺序放到时间线')
+      return result
+    }
+    
+    // ── merge ───────────────────────────────────────────────────────────────────
+    async function fcMergeRun(options) {
+      const request = options || {}
+      const sources = store.staging.map(function (file) { return { file: file } })
+      if (sources.length === 0) { fcFail('待合并列表是空的'); return null }
+      const body = {
+        sources: sources,
+        name: request.name || store.merge.name || '合并序列',
+      }
+      if (request.createName) {
+        body.create = { name: request.createName, dir: store.merge.createDir || undefined, overwrite: request.overwrite === true }
+      } else if (store.merge.createName) {
+        body.create = { name: store.merge.createName, dir: store.merge.createDir || undefined, overwrite: request.overwrite === true }
+      } else {
+        if (!store.detail) { fcFail('要么打开一个工程，要么填一个新工程名'); return null }
+        body.project = fcProjectRef()
+      }
+      if (store.merge.settings) body.settings = store.merge.settings
+      if (store.merge.exportAfter) {
+        body.export = { scale: store.scale }
+      }
+      const result = await fcRun('合并 ' + sources.length + ' 段素材', function () {
+        return host.call('merge.write', body)
+      })
+      if (!result) return null
+      store.merge.result = result
+      store.merge.compat = result.compat || null
+      const list = await host.call('projects.list', {})
+      store.projects = list && Array.isArray(list.projects) ? list.projects : store.projects
+      if (result.detail) fcSetDetail(result.detail)
+      if (result.job) {
+        store.tab = 'jobs'
+        fcNotice('合并完成，已开始导出')
+        fcRefreshJobs().catch(function () { })
+      } else {
+        fcNotice('合并完成：' + (result.sequence ? result.sequence.name : '新序列') + ' · ' + sources.length + ' 段')
+      }
+      fcEmit()
+      return result
+    }
+    
+    // Merging into a brand-new project is the common case when the sources are not
+    // already part of anything, so the default name comes from the first file.
+    function fcMergeDefaultName() {
+      if (store.staging.length === 0) return ''
+      const first = store.staging[0].split(/[\\/]/).pop() || ''
+      const stem = first.replace(/\.[^.]+$/, '')
+      return store.staging.length === 1 ? stem : stem + ' 等 ' + store.staging.length + ' 段'
+    }
+    
+    // ── export extras ───────────────────────────────────────────────────────────
+    async function fcInterchange(format) {
+      if (!store.detail) return
+      const result = await fcRun('导出 ' + String(format).toUpperCase(), function () {
+        return host.call('project.write', {
+          action: 'exportInterchange',
+          project: fcProjectRef(),
+          format: format,
+          sequence: store.detail.activeSequence,
+        })
+      })
+      if (!result) return
+      fcNotice('已导出 ' + result.format + '：' + result.out.split(/[\\/]/).pop())
+    }
+    
+    // ── sequences ───────────────────────────────────────────────────────────────
+    async function fcCreateSequence(options) {
+      if (!store.detail) return null
+      const sequence = fcSequence()
+      const body = {
+        action: 'create',
+        project: fcProjectRef(),
+        name: (options && options.name) || '序列 ' + ((store.detail.sequences || []).length + 1),
+        width: (options && options.width) || (sequence && sequence.width) || 1920,
+        height: (options && options.height) || (sequence && sequence.height) || 1080,
+        fps: (options && options.fps) || (sequence && sequence.fps) || 25,
+      }
+      const result = await fcRun('新建序列', function () {
+        return host.call('sequence.write', body)
+      })
+      if (result && result.detail) fcSetDetail(result.detail)
+      if (result) fcNotice('已新建序列')
+      return result
+    }
+    
+    async function fcDeleteSequence(id) {
+      const result = await fcRun('删除序列', function () {
+        return host.call('sequence.write', { action: 'delete', project: fcProjectRef(), sequence: id })
+      })
+      if (result && result.detail) fcSetDetail(result.detail)
+      if (result) fcNotice('已删除序列')
+    }
+    
+    async function fcRenameSequence(id, name) {
+      if (!name) return
+      const result = await fcRun('重命名序列', function () {
+        return host.call('sequence.write', { action: 'rename', project: fcProjectRef(), sequence: id, name: name })
+      })
+      if (result && result.detail) fcSetDetail(result.detail)
+      if (result) fcNotice('已重命名')
+    }
+    
+    // ── presets ─────────────────────────────────────────────────────────────────
+    async function fcPresetSave(preset) {
+      const result = await fcRun('保存预设', function () {
+        return host.call('presets.write', { action: 'save', preset: preset })
+      })
+      if (!result) return null
+      store.workspace = Object.assign({}, store.workspace, { presets: result.presets })
+      fcNotice('已保存预设「' + (result.preset ? result.preset.name : '') + '」')
+      return result
+    }
+    
+    async function fcPresetRemove(id) {
+      const result = await fcRun('删除预设', function () {
+        return host.call('presets.write', { action: 'remove', id: id })
+      })
+      if (!result) return
+      store.workspace = Object.assign({}, store.workspace, { presets: result.presets })
+      fcNotice('已删除预设')
+    }
+    
+    // ── settings ────────────────────────────────────────────────────────────────
+    async function fcSetRoot(root) {
+      const result = await fcRun('切换工作区', function () {
+        return host.call('workspace.write', { action: 'setRoot', root: root })
+      })
+      if (!result) return
+      store.workspace = result.workspace || store.workspace
+      store.projects = result.projects || []
+      fcSetDetail(null)
+      fcNotice('工作区已切换到 ' + (result.workspace ? result.workspace.rootDisplay : root))
+    }
+    
+    async function fcSetCli(cliPath) {
+      const result = await fcRun('设置 CLI 路径', function () {
+        return host.call('workspace.write', { action: 'setCli', cliPath: cliPath })
+      })
+      if (!result) return
+      store.workspace = result.workspace || store.workspace
+      fcNotice(result.workspace && result.workspace.cli && result.workspace.cli.exists ? 'CLI 可达' : '这个路径下找不到 filmcraft-cli')
+    }
+    
+    // ── multi-select + batch grade ──────────────────────────────────────────────
+    // Batch operations are what "对不同的视频做处理" means in practice: pick several
+    // clips, apply one recipe to all of them, in one undo step.
+    function fcMultiToggle(clipId) {
+      const list = store.multi.slice()
+      const at = list.indexOf(clipId)
+      if (at >= 0) list.splice(at, 1)
+      else list.push(clipId)
+      store.multi = list
+      fcEmit()
+    }
+    
+    function fcMultiSet(clipIds) {
+      store.multi = (clipIds || []).slice()
+      fcEmit()
+    }
+    
+    function fcMultiAll() {
+      const all = fcClips().map(function (clip) { return clip.clip })
+      store.multi = store.multi.length === all.length ? [] : all
+      fcEmit()
+    }
+    
+    function fcMultiIds() {
+      return store.multi.slice()
+    }
+    
+    async function fcGradeMany(clipIds, presetId) {
+      const ids = (clipIds && clipIds.length > 0 ? clipIds : store.multi).slice()
+      if (ids.length === 0) { fcFail('先选片段'); return null }
+      const preset = fcPreset(presetId)
+      const result = await fcRun('批量调色 ' + ids.length + ' 段', function () {
+        return host.call('grade.write', { project: fcProjectRef(), clips: ids, preset: presetId })
+      })
+      if (!result) return null
+      if (result.detail) fcSetDetail(result.detail, { keep: true })
+      const failed = Array.isArray(result.failed) ? result.failed : []
+      if (failed.length > 0) {
+        store.error = '有 ' + failed.length + ' 段失败：' + (failed[0].error || '')
+      } else {
+        fcNotice('已对 ' + ids.length + ' 段套用「' + (preset ? preset.name : presetId) + '」')
+      }
+      fcEmit()
+      return result
+    }
+    
+    async function fcGradeClearMany(clipIds) {
+      const ids = (clipIds && clipIds.length > 0 ? clipIds : store.multi).slice()
+      if (ids.length === 0) return null
+      const result = await fcRun('清空调色 ' + ids.length + ' 段', function () {
+        return host.call('grade.write', { project: fcProjectRef(), clips: ids, clear: true })
+      })
+      if (result && result.detail) fcSetDetail(result.detail, { keep: true })
+      if (result) fcNotice('已清空 ' + ids.length + ' 段调色')
+      return result
+    }
+
+    // ── 20-css.js ────────────────────────────────────────────────────
+    // ── styles ──────────────────────────────────────────────────────────────────
+    // Injected once by apply(). Two rules of the previous version that must survive:
+    //
+    //   · the preview box is sized from a *definite height*, with the width derived
+    //     from the aspect ratio. Sizing it from the panel width makes the wide
+    //     (settings) surface 825px tall and pushes everything below it off screen.
+    //   · lists are capped in vh, so a short window shrinks them instead of burying
+    //     the export section.
+    //
+    // The palette follows the shell: light by default, dark under prefers-color-scheme.
+
+    function fcCss() {
+      return [
+        '.fc-root{--bg:#fff;--fg:#1f2328;--dim:#656d76;--line:#d0d7de;--soft:#f6f8fa;--ok:#1a7f37;--run:#9a6700;--err:#cf222e;--bar:#0969da;box-sizing:border-box;color:var(--fg);font-family:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;letter-spacing:-.01em}',
+        '@media (prefers-color-scheme:dark){.fc-root{--bg:#0d1117;--fg:#e6edf3;--dim:#8b949e;--line:#30363d;--soft:#161b22;--ok:#3fb950;--run:#d29922;--err:#f85149;--bar:#2f81f7}}',
+        '.fc-root *{box-sizing:border-box;font-family:inherit}',
+        '.fc-wrap{width:100%;padding:12px;font-size:12px;line-height:1.55}',
+        '.fc-wrap.wide{max-width:1100px;margin:0 auto;padding:20px}',
+        '.fc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}',
+        '.fc-title{margin:0;font-size:13px;font-weight:700}',
+        '.fc-wrap.wide .fc-title{font-size:15px}',
+        '.fc-sub{margin-top:3px;color:var(--dim);font-size:10px;word-break:break-word}',
+        '.fc-badge{display:inline-flex;align-items:center;gap:5px;min-height:20px;padding:2px 7px;border:1px solid var(--line);border-radius:3px;background:var(--soft);color:var(--dim);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}',
+        '.fc-badge.run{color:var(--run);border-color:var(--run)}',
+        '.fc-badge.ok{color:var(--ok);border-color:var(--ok)}',
+        '.fc-badge.err{color:var(--err);border-color:var(--err)}',
+        '.fc-dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}',
+        '.fc-badge.run .fc-dot{animation:fc-pulse 1.2s ease-in-out infinite}',
+        '@keyframes fc-pulse{0%,100%{opacity:1}50%{opacity:.25}}',
+        '.fc-bar{position:relative;height:18px;margin:12px 0 6px;border:1px solid var(--line);border-radius:4px;background:var(--soft);overflow:hidden}',
+        '.fc-bar-fill{height:100%;background:var(--bar);transition:width .6s ease}',
+        '.fc-bar-txt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}',
+        '.fc-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:10px 0}',
+        '.fc-wrap.wide .fc-stats{grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}',
+        '.fc-stat{padding:6px 8px;border:1px solid var(--line);border-radius:4px;background:var(--soft);min-width:0}',
+        '.fc-stat-k{color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.fc-stat-v{margin-top:2px;font-size:12px;font-weight:700;word-break:break-all}',
+        '.fc-wrap.wide .fc-stat-v{font-size:14px}',
+        '.fc-sec{margin-top:14px}',
+        '.fc-sec-h{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:10px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}',
+        '.fc-sec-h::after{content:"";flex:1;height:1px;background:var(--line)}',
+        '.fc-note{display:flex;gap:8px;padding:6px 8px;border-left:3px solid var(--line);background:var(--soft);margin-bottom:5px;font-size:10px}',
+        '.fc-alert{padding:10px;border:1px solid var(--err);border-radius:4px;color:var(--err);background:var(--soft);margin-top:10px;font-size:10px;word-break:break-word}',
+        '.fc-empty{padding:20px 8px;text-align:center;color:var(--dim)}',
+        '.fc-path{margin-top:10px;color:var(--dim);font-size:9px;word-break:break-all;line-height:1.5}',
+        // fallback drawer: docked right, NO backdrop — the main UI stays usable
+        '.fc-drawer{position:fixed;top:44px;right:10px;bottom:10px;z-index:1200;width:min(340px,calc(100vw - 20px));display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;background:var(--bg);box-shadow:0 8px 30px rgba(0,0,0,.28);overflow:hidden}',
+        '.fc-drawer-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--soft);flex:0 0 auto}',
+        '.fc-drawer-hd b{font-size:11px}',
+        '.fc-drawer-bd{flex:1;overflow:auto}',
+        '.fc-x{width:24px;height:24px;padding:0;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--dim);font:inherit;font-size:14px;line-height:1;cursor:pointer;flex:0 0 auto}',
+        '.fc-x:hover{color:var(--err);border-color:var(--err)}',
+        // sidebar entry
+        '.fc-entry{display:flex;align-items:center;gap:8px;width:100%;padding:6px 10px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer;text-align:left}',
+        '.fc-entry:hover{background:var(--soft)}',
+        '.fc-entry.rail{justify-content:center;padding:6px}',
+        '.fc-entry-gl{flex:0 0 auto;display:inline-flex}',
+        '.fc-entry-lb{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.fc-entry-pct{margin-left:auto;color:var(--bar);font-size:10px;font-weight:700}',
+        '.fc-entry.rail .fc-entry-pct{display:none}',
+        // tabs
+        '.fc-tabs{display:flex;gap:4px;margin:0 0 12px}',
+        '.fc-tab{flex:1;padding:6px 8px;border:1px solid var(--line);border-radius:5px;background:var(--soft);color:var(--dim);font:inherit;font-size:11px;font-weight:700;cursor:pointer}',
+        '.fc-tab.on{color:var(--bar);border-color:var(--bar);background:var(--bg)}',
+        // form rows
+        '.fc-row{display:flex;align-items:center;gap:6px;margin-bottom:6px}',
+        '.fc-lb{color:var(--dim);font-size:10px;min-width:32px;flex:0 0 auto}',
+        '.fc-inp,.fc-sel{flex:1;min-width:0;padding:4px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font:inherit;font-size:11px}',
+        '.fc-btn{padding:4px 8px;border:1px solid var(--line);border-radius:4px;background:var(--soft);color:var(--fg);font:inherit;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap}',
+        '.fc-btn:hover:not(:disabled){border-color:var(--bar);color:var(--bar)}',
+        '.fc-btn:disabled{opacity:.4;cursor:default}',
+        '.fc-btn.primary{border-color:var(--bar);color:var(--bar)}',
+        '.fc-btn.danger:hover:not(:disabled){border-color:var(--err);color:var(--err)}',
+        '.fc-btns{display:flex;flex-wrap:wrap;gap:4px}',
+        // sequences
+        '.fc-chips{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}',
+        '.fc-chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:2px 7px;border:1px solid var(--line);border-radius:10px;background:var(--soft);color:var(--dim);font:inherit;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.fc-chip.on{color:var(--bar);border-color:var(--bar);background:var(--bg)}',
+        // clips
+        '.fc-clips{display:flex;flex-direction:column;gap:3px;max-height:min(230px,26vh);overflow:auto;border:1px solid var(--line);border-radius:5px;padding:4px;background:var(--soft)}',
+        '.fc-clip{display:flex;align-items:center;gap:6px;padding:5px 6px;border:1px solid transparent;border-radius:3px;cursor:pointer;flex:0 0 auto;min-height:26px;background:var(--bg)}',
+        '.fc-clip:hover{border-color:var(--line)}',
+        '.fc-clip.on{border-color:var(--bar);background:var(--soft)}',
+        '.fc-clip-n{color:var(--dim);font-size:9px;min-width:18px;flex:0 0 auto}',
+        '.fc-clip-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px}',
+        '.fc-clip-t{color:var(--dim);font-size:9px;flex:0 0 auto}',
+        '.fc-g{width:6px;height:6px;border-radius:50%;background:var(--bar);flex:0 0 auto}',
+        '.fc-g.none{background:var(--line)}',
+        // preview: definite height, width derived from the picture's aspect ratio
+        '.fc-prev{position:relative;height:min(26vh,200px);aspect-ratio:4/3;width:auto;max-width:100%;margin:0 auto 6px;background:#000;border:1px solid var(--line);border-radius:5px;overflow:hidden;display:flex;align-items:center;justify-content:center}',
+        '.fc-prev-i,.fc-prev-v{width:100%;height:100%;object-fit:contain;display:block}',
+        '.fc-prev-none{color:var(--dim);font-size:10px;text-align:center;padding:0 8px}',
+        '.fc-prev-ov{position:absolute;right:5px;top:5px;padding:2px 6px;border-radius:3px;background:rgba(0,0,0,.65);color:#fff;font-size:9px}',
+        '.fc-fold{cursor:pointer;border:0;background:none;color:var(--dim);font:inherit;font-size:9px;font-weight:700;padding:0;letter-spacing:.05em}',
+        '.fc-fold:hover{color:var(--bar)}',
+        '.fc-range{flex:1;min-width:0;height:16px;accent-color:var(--bar)}',
+        '.fc-num{width:54px;flex:0 0 auto;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font:inherit;font-size:10px;text-align:center}',
+        // jobs
+        '.fc-job{padding:6px 7px;border:1px solid var(--line);border-radius:4px;background:var(--soft);margin-bottom:5px}',
+        '.fc-job-h{display:flex;align-items:center;gap:6px;margin-bottom:3px}',
+        '.fc-job-n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:700}',
+        '.fc-prog{position:relative;height:10px;margin:4px 0;border:1px solid var(--line);border-radius:3px;background:var(--bg);overflow:hidden}',
+        '.fc-prog-fill{height:100%;background:var(--bar);transition:width .5s ease}',
+        '.fc-meta{color:var(--dim);font-size:9px;word-break:break-all;line-height:1.5}',
+        '.fc-toast{padding:6px 8px;border-left:3px solid var(--ok);background:var(--soft);margin:8px 0;font-size:10px;word-break:break-word}',
+        '.fc-toast.err{border-left-color:var(--err);color:var(--err)}',
+        '.fc-hint{color:var(--dim);font-size:9px;line-height:1.6;margin-top:6px}',
+      ].join('')
+    }
+
+    // ── 30-ui.js ─────────────────────────────────────────────────────
+    // ── ui ──────────────────────────────────────────────────────────────────────
+    // The panel body. It reads the store directly and calls the actions from
+    // 10-store.js; there is no second state layer, so a repaint shows exactly what
+    // the host reported after the last call.
+    //
+    // Two surfaces share it: the docked sidebar tab and the wide settings page. The
+    // `wide` flag only changes the wrapper class — every list below is vh-capped so
+    // neither surface can push the export controls out of reach.
+
+    const FC_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.6" y="3" width="12.8" height="10" rx="2"/><path d="M6.2 6.4l3.4 1.6-3.4 1.6z"/></svg>'
+    const FC_TAB_KIND = 'filmcraft-progress'
+    const FC_TAB_ID = 'dsh-filmcraft-progress/panel'
+    const FC_TAB_TITLE = '剪辑'
+
+    const FC_STATE_TEXT = { queued: '排队', running: '导出中', done: '已完成', failed: '失败', cancelled: '已取消' }
+    const FC_STATE_CLASS = { running: 'run', done: 'ok', failed: 'err', cancelled: 'err', queued: '' }
+
+    function FcIcon() {
+      return h('span', { className: 'fc-entry-gl', dangerouslySetInnerHTML: { __html: FC_ICON } })
+    }
+
+    function useFcStore() {
+      const pair = React.useState(0)
+      React.useEffect(function () {
+        const listener = function () { pair[1](function (n) { return n + 1 }) }
+        store.listeners.add(listener)
+        return function () { store.listeners.delete(listener) }
+      }, [])
+    }
+
+    // The pane body does not scroll by itself, so the panel caps its own height at
+    // the viewport below its top edge and scrolls inside. Measured, never hard-coded:
+    // the top moves with the header, the tab strip and the sidebar width.
+    function usePanelFill(ref) {
+      const pair = React.useState(0)
+      const setHeight = pair[1]
+      React.useEffect(function () {
+        let last = -1
+        function measure() {
+          const element = ref.current
+          if (element === null || element === undefined) return
+          if (typeof element.getBoundingClientRect !== 'function') return
+          const viewport = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 0
+          if (!viewport) return
+          const top = element.getBoundingClientRect().top
+          const height = Math.max(220, Math.round(viewport - top - 10))
+          // Guard: an unchanged value would re-render forever once a ResizeObserver
+          // is watching the element whose size this changes.
+          if (height !== last) { last = height; setHeight(height) }
+        }
+        measure()
+        if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('resize', measure)
+        let observer = null
+        if (typeof ResizeObserver !== 'undefined' && ref.current) {
+          observer = new ResizeObserver(measure)
+          observer.observe(ref.current)
+        }
+        return function () {
+          if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('resize', measure)
+          if (observer !== null) observer.disconnect()
+        }
+      }, [])
+      return pair[0]
+    }
+
+    function FcBtn(props) {
+      const cls = 'fc-btn' + (props.primary ? ' primary' : '') + (props.danger ? ' danger' : '')
+      return h('button', {
+        className: cls,
+        type: 'button',
+        title: props.title,
+        disabled: props.disabled === true,
+        onClick: props.onClick,
+      }, props.children)
+    }
+
+    function FcBadge(props) {
+      return h('span', { className: 'fc-badge' + (props.kind ? ' ' + props.kind : '') },
+        h('span', { className: 'fc-dot' }), props.children)
+    }
+
+    function FcSection(props) {
+      return h('div', { className: 'fc-sec' },
+        h('div', { className: 'fc-sec-h' }, props.title, props.extra || null),
+        props.children)
+    }
+
+    function FcStat(props) {
+      return h('div', { className: 'fc-stat' },
+        h('div', { className: 'fc-stat-k' }, props.label),
+        h('div', { className: 'fc-stat-v' }, props.children))
+    }
+
+    // ── preview ─────────────────────────────────────────────────────────────────
+    function PreviewBlock() {
+      const clip = fcSelectedClip()
+      const busy = store.busy !== ''
+      const span = clip ? Math.max(0.5, Math.min(store.proxySeconds, PROXY_MAX, clip.dur - store.scrub)) : 0
+      return h('div', { className: 'fc-sec' },
+        h('div', { className: 'fc-sec-h' },
+          '预览' + (clip === null ? '' : ' · ' + clip.trackLabel + ' ' + fcShort(clip.name, 22)),
+          h('button', {
+            className: 'fc-fold', type: 'button',
+            title: store.prevOpen ? '收起画面，给片段列表腾地方' : '展开画面',
+            onClick: function () { store.prevOpen = !store.prevOpen; fcEmit() },
+          }, store.prevOpen ? '收起画面' : '展开画面')),
+
+        store.prevOpen ? h('div', { className: 'fc-prev' },
+          store.proxyUrl
+            ? h('video', { className: 'fc-prev-v', src: store.proxyUrl, controls: true, autoPlay: true, loop: true, playsInline: true })
+            : (store.frameUrl
+              ? h('img', { className: 'fc-prev-i', src: store.frameUrl, alt: '预览画面' })
+              : h('div', { className: 'fc-prev-none' },
+                store.frameBusy ? '渲染中…' : (clip === null ? '选一个片段' : '准备中…'))),
+          store.frameBusy && store.frameUrl ? h('div', { className: 'fc-prev-ov' }, '渲染中…') : null) : null,
+
+        clip === null ? null : h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '时间'),
+          h(FcBtn, {
+            disabled: busy || store.frameBusy, title: '往前 0.5 秒',
+            onClick: function () { fcScrub(Math.max(0, store.scrub - 0.5)) },
+          }, '◀'),
+          h('input', {
+            className: 'fc-range', type: 'range', min: 0, max: Math.max(0.001, clip.dur), step: 0.05,
+            value: store.scrub, onChange: function (event) { fcScrub(Number(event.target.value)) },
+          }),
+          h(FcBtn, {
+            disabled: busy || store.frameBusy, title: '往后 0.5 秒',
+            onClick: function () { fcScrub(Math.min(clip.dur, store.scrub + 0.5)) },
+          }, '▶'),
+          h('span', { className: 'fc-clip-t' }, store.scrub.toFixed(2) + ' / ' + clip.dur.toFixed(2) + 's')),
+
+        clip === null ? null : h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '视频'),
+          h('input', {
+            className: 'fc-num', type: 'number', min: 0.5, max: PROXY_MAX, step: 0.5,
+            value: String(store.proxySeconds),
+            title: '预览片段长度，0.5 – ' + PROXY_MAX + ' 秒',
+            onChange: function (event) { store.proxySeconds = event.target.value; fcEmit() },
+            // Typing "1" on the way to "15" must not be clamped mid-keystroke.
+            onBlur: function () {
+              store.proxySeconds = Math.max(0.5, Math.min(PROXY_MAX, Number(store.proxySeconds) || 0.5))
+              fcEmit()
+            },
+          }),
+          h('span', { className: 'fc-clip-t' }, '秒'),
+          h('button', {
+            className: 'fc-fold', type: 'button', title: '从头预览整段（最长 ' + PROXY_MAX + ' 秒）',
+            onClick: fcWholeClip,
+          }, '整段'),
+          h(FcBtn, { disabled: busy || store.proxyBusy, onClick: fcProxy }, store.proxyBusy ? '导出中…' : '生成预览片段'),
+          store.proxyUrl ? h(FcBtn, {
+            onClick: function () {
+              try { URL.revokeObjectURL(store.proxyUrl) } catch (_) { }
+              store.proxyUrl = ''
+              fcEmit()
+            },
+          }, '关闭视频') : null),
+
+        store.frameError ? h('div', { className: 'fc-toast err' }, store.frameError) : null,
+        store.proxyError ? h('div', { className: 'fc-toast err' }, store.proxyError) : null,
+
+        store.prevOpen ? h('div', { className: 'fc-hint' },
+          '画面是套过调色的成片效果；拖动时间轴看任意一帧。',
+          h('br'), '「生成预览片段」渲染真实视频，长度自己填（0.5–' + PROXY_MAX + ' 秒），约 ' +
+            span.toFixed(1) + ' 秒 ≈ ' + Math.max(1, Math.round(span * 50 * 0.13)) + ' 秒渲染时间，结果会缓存。') : null)
+    }
+
+    // ── clips ───────────────────────────────────────────────────────────────────
+    // Two selection concepts, deliberately separate: `clipId` is the clip the editor
+    // acts on (preview, trim), `store.multi` is the set a batch grade applies to.
+    // Mixing them would make every single-clip action quietly a batch action.
+    function ClipList() {
+      const clips = fcClips()
+      const multi = store.multi || []
+      return h('div', null,
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '多选'),
+          h(FcBtn, { disabled: clips.length === 0, onClick: fcMultiAll }, multi.length === clips.length && clips.length > 0 ? '取消全选' : '全选'),
+          h(FcBtn, { disabled: multi.length === 0, onClick: function () { fcMultiSet([]) } }, '清空'),
+          h('span', { className: 'fc-clip-t' }, multi.length === 0 ? '点序号可多选' : '已选 ' + multi.length + ' 段')),
+        h('div', { className: 'fc-clips' },
+          clips.map(function (clip, index) {
+            const on = clip.clip === store.clipId
+            const picked = multi.indexOf(clip.clip) >= 0
+            return h('div', {
+              className: 'fc-clip' + (on ? ' on' : ''),
+              key: 'clip-' + clip.clip,
+              title: clip.name,
+              onClick: function () {
+                if (store.clipId === clip.clip) return
+                store.clipId = clip.clip
+                store.scrub = 0
+                store.proxyUrl = ''
+                fcEmit()
+                if (store.prevOpen) fcFrame(clip.start)
+              },
+            },
+              h('span', {
+                className: 'fc-clip-n',
+                style: { cursor: 'pointer', color: picked ? 'var(--bar)' : undefined, fontWeight: picked ? 700 : 400 },
+                title: picked ? '移出多选' : '加入多选',
+                onClick: function (event) {
+                  event.stopPropagation()
+                  fcMultiToggle(clip.clip)
+                },
+              }, (picked ? '✓' : '') + (index + 1)),
+              h('span', { className: 'fc-g' + (fcHasGrade(clip) ? '' : ' none') }),
+              h('span', { className: 'fc-clip-name' }, fcShort(clip.name, 30)),
+              h('span', { className: 'fc-clip-t' }, clip.trackLabel + ' ' + fcTime(clip.start) + '–' + fcTime(clip.end)),
+              clip.enabled ? null : h('span', { className: 'fc-clip-t' }, '停用'))
+          })))
+    }
+
+    // ── edit actions ────────────────────────────────────────────────────────────
+    function EditActions() {
+      const clip = fcSelectedClip()
+      const clips = fcClips()
+      const index = clip === null ? -1 : clips.indexOf(clip)
+      const busy = store.busy !== ''
+      const presets = store.workspace && Array.isArray(store.workspace.presets) ? store.workspace.presets : []
+      return h('div', null,
+        h('div', { className: 'fc-sec-h' },
+          '编辑' + (clip === null ? '' : ' · ' + clip.trackLabel + ' #' + (index + 1) + ' · ' + clip.dur.toFixed(2) + 's')),
+
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '裁头'),
+          h(FcBtn, { disabled: busy || clip === null, title: '把入点往左拉 0.5 秒（变长）', onClick: function () { fcTrim('in', -0.5) } }, '−0.5s'),
+          h(FcBtn, { disabled: busy || clip === null, title: '裁掉开头 0.5 秒', onClick: function () { fcTrim('in', 0.5) } }, '+0.5s'),
+          h(FcBtn, { disabled: busy || clip === null, onClick: function () { fcTrim('in', 1) } }, '+1s'),
+          h(FcBtn, { disabled: busy || clip === null, onClick: function () { fcTrim('in', 3) } }, '+3s')),
+
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '裁尾'),
+          h(FcBtn, { disabled: busy || clip === null, onClick: function () { fcTrim('out', -0.5) } }, '−0.5s'),
+          h(FcBtn, { disabled: busy || clip === null, title: '裁掉结尾 0.5 秒', onClick: function () { fcTrim('out', 0.5) } }, '+0.5s'),
+          h(FcBtn, { disabled: busy || clip === null, onClick: function () { fcTrim('out', 1) } }, '+1s'),
+          h(FcBtn, { disabled: busy || clip === null, onClick: function () { fcTrim('out', 3) } }, '+3s')),
+
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '排序'),
+          h(FcBtn, { disabled: busy || clip === null || index <= 0, onClick: function () { fcMoveClip(-1) } }, '◀ 上移'),
+          h(FcBtn, { disabled: busy || clip === null || index >= clips.length - 1, onClick: function () { fcMoveClip(1) } }, '下移 ▶'),
+          h(FcBtn, { danger: true, disabled: busy || clip === null, onClick: fcDeleteClip }, '删除')),
+
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '调色'),
+          presets.map(function (preset) {
+            return h(FcBtn, {
+              key: 'preset-' + preset.id,
+              disabled: busy || clip === null,
+              title: preset.builtin ? '内置预设' : '自定义预设',
+              onClick: function () { fcApplyGrade(preset.id) },
+            }, preset.name)
+          }),
+          h(FcBtn, { disabled: busy || clip === null || !fcHasGrade(clip), onClick: fcClearGrade }, '清空')),
+
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '其他'),
+          h(FcBtn, { disabled: busy || clip === null, onClick: fcToggleClip }, clip === null || clip.enabled ? '停用' : '启用'),
+          h(FcBtn, { disabled: busy, title: '还原到上一次编辑前的工程快照', onClick: fcUndo }, '↩ 撤销')),
+
+        // Batch is its own block: when nothing is checked it falls back to every clip,
+        // which is the "整条片子统一调色" gesture the old version hard-coded.
+        h('div', { className: 'fc-sec-h' }, '批量'),
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '范围'),
+          h('span', { className: 'fc-clip-t' },
+            (store.multi || []).length > 0 ? '选中的 ' + store.multi.length + ' 段' : '全部 ' + clips.length + ' 段')),
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '调色'),
+          presets.map(function (preset) {
+            return h(FcBtn, {
+              key: 'batch-' + preset.id,
+              disabled: busy || clips.length === 0,
+              title: '对' + ((store.multi || []).length > 0 ? '选中的片段' : '全部片段') + '套用「' + preset.name + '」',
+              onClick: function () { fcGradeMany(null, preset.id) },
+            }, preset.name)
+          })),
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '操作'),
+          h(FcBtn, { disabled: busy || clips.length === 0, onClick: function () { fcGradeClearMany(null) } }, '清空这批调色')))
+    }
+
+    // ── export ──────────────────────────────────────────────────────────────────
+    function ExportBlock() {
+      const busy = store.busy !== ''
+      const running = fcRunningJobs()
+      const job = running.length > 0 ? running[0] : null
+      const ratio = job && job.progress && typeof job.progress.ratio === 'number' ? job.progress.ratio : null
+      return h(FcSection, { title: '导出' },
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '输出'),
+          h('input', {
+            className: 'fc-inp', type: 'text', value: store.out,
+            placeholder: '留空 = 工作区 exports/工程名-时间.mp4',
+            onChange: function (event) { store.out = event.target.value; fcEmit() },
+          })),
+
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '格式'),
+          h('select', {
+            className: 'fc-sel', value: store.format,
+            onChange: function (event) { store.format = event.target.value; fcEmit() },
+          },
+            ['h264', 'hevc', 'prores'].map(function (name) { return h('option', { value: name, key: name }, name) })),
+          h('span', { className: 'fc-lb' }, '缩放'),
+          h('select', {
+            className: 'fc-sel', value: String(store.scale),
+            onChange: function (event) { store.scale = Number(event.target.value); fcEmit() },
+          },
+            [['1', '100%'], ['0.5', '50%'], ['0.25', '25%']].map(function (pair) {
+              return h('option', { value: pair[0], key: pair[0] }, pair[1])
+            }))),
+
+        h('div', { className: 'fc-btns' },
+          h(FcBtn, { primary: true, disabled: busy, onClick: fcExport }, '导出当前序列')),
+
+        job === null ? null : h('div', null,
+          h('div', { className: 'fc-meta' }, '正在导出：' + fcShort(job.project ? job.project.name : '', 24) +
+            ' · ' + (ratio === null ? '采样中' : Math.round(ratio * 100) + '%')),
+          h('div', { className: 'fc-prog' },
+            h('div', { className: 'fc-prog-fill', style: { width: (ratio === null ? 0 : ratio * 100) + '%' } })),
+          h('div', { className: 'fc-btns' }, h(FcBtn, { onClick: function () { fcJobAction('cancel', job.id) } }, '取消任务'))),
+
+        h('div', { className: 'fc-hint' }, '导出在后台跑，进度在「任务」页实时刷新；同一工程可随时再剪辑。'))
+    }
+
+    // ── project / sequence header ───────────────────────────────────────────────
+    function ProjectBlock() {
+      const detail = store.detail
+      const sequences = detail && Array.isArray(detail.sequences) ? detail.sequences : []
+      const busy = store.busy !== ''
+      return h('div', null,
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '工程'),
+          h('select', {
+            className: 'fc-sel', value: store.projectId || '',
+            onChange: function (event) { if (event.target.value) fcOpenProject(event.target.value) },
+          },
+            h('option', { value: '' }, store.projects.length > 0 ? '选择工程…' : '还没有工程'),
+            store.projects.map(function (project) {
+              return h('option', { key: project.id, value: project.id }, (project.exists ? '' : '⚠ ') + project.name)
+            })),
+          h(FcBtn, { disabled: busy, title: '在工作区里重新扫描 .fcproj', onClick: fcScan }, '扫描')),
+
+        detail === null ? null : h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-clip-t', title: detail.path }, detail.name + ' · ' + sequences.length + ' 序列 · rev ' + detail.revision),
+          h(FcBtn, { disabled: busy, onClick: fcRefreshProject }, '刷新')),
+
+        detail === null ? null : h('div', { className: 'fc-chips' },
+          sequences.map(function (sequence) {
+            return h('button', {
+              key: 'seq-' + sequence.id,
+              className: 'fc-chip' + (sequence.active ? ' on' : ''),
+              type: 'button',
+              title: (sequence.clipCount === null || sequence.clipCount === undefined ? '' : sequence.clipCount + ' 段 · ') + fcTime(sequence.duration),
+              onClick: function () { if (!sequence.active) fcActivateSequence(sequence.id) },
+            }, (sequence.active ? '● ' : '') + fcShort(sequence.name, 18))
+          }),
+          h(FcBtn, { disabled: busy, onClick: fcNewSequence }, '+ 序列')))
+    }
+
+    // ── edit view ───────────────────────────────────────────────────────────────
+    function EditView() {
+      const detail = store.detail
+      if (detail === null) {
+        return h('div', null,
+          h('div', { className: 'fc-row' },
+            h('span', { className: 'fc-lb' }, '工程'),
+            h(FcBtn, { disabled: store.busy !== '', onClick: fcScan }, '扫描'),
+            h(FcBtn, { disabled: store.busy !== '', onClick: function () { fcRefreshJobs().catch(function () { }) } }, '刷新')),
+
+          store.projects.length === 0
+            ? h('div', { className: 'fc-empty' }, '工作区里还没有登记工程。点「扫描」找 .fcproj。')
+            : h('div', { className: 'fc-clips', style: { maxHeight: '180px' } },
+              store.projects.map(function (project) {
+                return h('div', {
+                  key: 'p-' + project.id,
+                  className: 'fc-clip',
+                  title: project.display,
+                  onClick: function () { fcOpenProject(project.id) },
+                },
+                  h('span', { className: 'fc-clip-name' }, (project.exists ? '' : '⚠ ') + project.name),
+                  h('span', { className: 'fc-clip-t' }, project.exists ? fcBytes(project.bytes) : '文件缺失'))
+              })),
+
+          h('div', { className: 'fc-hint' },
+            '工作区：' + (store.workspace ? store.workspace.rootDisplay : '…'),
+            h('br'), '选中工程后可以：预览画面、裁头裁尾、删除、上下移、调色、导出。'))
+      }
+
+      const sequence = fcSequence()
+      const clip = fcSelectedClip()
+      return h('div', null,
+        h(ProjectBlock, null),
+
+        store.workspace === null || store.workspace.cli.exists
+          ? null
+          : h('div', { className: 'fc-alert' }, '找不到 filmcraft-cli：' + store.workspace.cli.path),
+
+        detail === null ? null : h('div', { className: 'fc-path' }, detail.path),
+
+        sequence === null
+          ? h('div', { className: 'fc-empty' }, '这个工程没有激活的序列。新建一条序列再开始。')
+          : h('div', null,
+            h('div', { className: 'fc-stats' },
+              h(FcStat, { label: '序列' }, fcShort(sequence.name, 20)),
+              h(FcStat, { label: '时长' }, fcTime(sequence.duration)),
+              h(FcStat, { label: '规格' }, (sequence.width || '?') + '×' + (sequence.height || '?') + ' · ' + (sequence.fps ? sequence.fps.toFixed(2) : '?') + 'fps'),
+              h(FcStat, { label: '片段' }, String(fcClips().length))),
+
+            h(PreviewBlock, null),
+
+            h(FcSection, { title: '片段 (' + fcClips().length + ')' }, h(ClipList, null)),
+
+            h(FcSection, { title: '素材' },
+              h('div', { className: 'fc-btns' },
+                h(FcBtn, { disabled: store.busy !== '', onClick: fcRefreshAssets }, '读取素材'),
+                h(FcBtn, {
+                  disabled: store.busy !== '',
+                  onClick: function () { store.browseOpen = !store.browseOpen; fcEmit(); if (store.browseOpen) fcBrowse('') },
+                }, store.browseOpen ? '收起目录' : '选素材'),
+                h(FcBtn, {
+                  disabled: store.busy !== '' || (store.staging || []).length === 0,
+                  title: '只导入到工程素材箱，不动时间线',
+                  onClick: function () { fcImport(null) },
+                }, '导入 (' + (store.staging || []).length + ')'),
+                h(FcBtn, {
+                  disabled: store.busy !== '' || (store.staging || []).length === 0,
+                  title: '新建一条序列并把这批素材按顺序摆上去',
+                  onClick: function () { fcPlaceStaging(null) },
+                }, '放到新序列')),
+              (store.assets || []).length > 0 ? h('div', { className: 'fc-chips' },
+                store.assets.map(function (asset) {
+                  if (!asset.path) return null
+                  const staged = fcStagingIndex(asset.path) >= 0
+                  return h('button', {
+                    key: 'asset-' + asset.item, type: 'button',
+                    className: 'fc-chip' + (staged ? ' on' : ''),
+                    title: asset.path + ' · ' + (asset.width || '?') + '×' + (asset.height || '?') + ' · ' + (asset.fps || '?') + 'fps' + (asset.online === false ? '（离线）' : ''),
+                    disabled: store.busy !== '',
+                    onClick: function () { if (staged) fcUnstage(asset.path); else fcStage(asset.path) },
+                  }, (asset.online === false ? '⚠ ' : '') + fcShort(asset.name, 14))
+                }).filter(Boolean)) : null,
+              store.browseOpen ? h(FcBrowsePicker, { kind: 'media', onPick: fcStage }) : null),
+
+            clip === null ? h('div', { className: 'fc-hint' }, '选一个片段就能剪。') : h(EditActions, null),
+
+            h(ExportBlock, null)))
+    }
+
+    // ── jobs ────────────────────────────────────────────────────────────────────
+    function JobCard(props) {
+      const job = props.job
+      const progress = job.progress || {}
+      const ratio = typeof progress.ratio === 'number' ? progress.ratio : null
+      const expected = job.expected || {}
+      return h('div', { className: 'fc-job' },
+        h('div', { className: 'fc-job-h' },
+          h('span', { className: 'fc-job-n', title: job.out }, (job.project ? job.project.name : '（无工程）') +
+            (job.sequence ? ' · ' + job.sequence.name : '')),
+          h(FcBadge, { kind: FC_STATE_CLASS[job.state] || '' }, FC_STATE_TEXT[job.state] || job.state)),
+
+        h('div', { className: 'fc-prog' },
+          h('div', { className: 'fc-prog-fill', style: { width: (ratio === null ? 0 : Math.round(ratio * 1000) / 10) + '%' } })),
+
+        h('div', { className: 'fc-meta' },
+          (ratio === null ? '进度未知' : Math.round(ratio * 1000) / 10 + '%'),
+          ' · ' + fcBytes(progress.bytes) + (expected.bytes ? ' / ' + fcBytes(expected.bytes) : ''),
+          typeof progress.etaMs === 'number' ? ' · 剩余 ' + fcDuration(progress.etaMs) : '',
+          progress.bytesPerSecond ? ' · ' + fcBytes(progress.bytesPerSecond) + '/s' : ''),
+
+        h('div', { className: 'fc-meta' }, job.display || job.out || ''),
+        job.error && job.state === 'failed' ? h('div', { className: 'fc-toast err' }, job.error) : null,
+        job.state === 'done' && job.result ? h('div', { className: 'fc-meta' },
+          job.result.frames + ' 帧 · ' + fcDuration(job.result.seconds * 1000) + ' · ' + fcBytes(job.result.bytes)) : null,
+
+        h('div', { className: 'fc-btns', style: { marginTop: '4px' } },
+          job.state === 'running' ? h(FcBtn, { onClick: function () { fcJobAction('cancel', job.id) } }, '取消') : null,
+          job.state !== 'running' ? h(FcBtn, { danger: true, onClick: function () { fcJobAction('remove', job.id) } }, '清除记录') : null))
+    }
+
+    function LegacyBlock() {
+      const legacy = store.legacy
+      if (!legacy || legacy.present !== true) return null
+      const state = legacy.state || {}
+      return h('div', { className: 'fc-note' },
+        h('span', null, '旧版状态文件：'),
+        h('span', null, (state.phase || '未知') + (state.percent === null || state.percent === undefined ? '' : ' ' + Math.round(state.percent) + '%')),
+        h('span', { style: { color: 'var(--dim)' } }, legacy.alive ? '（' + fcAgo(legacy.updatedAt) + '）' : '（已停止更新）'))
+    }
+
+    function JobsView() {
+      const running = fcRunningJobs()
+      const done = store.jobs.filter(function (job) { return job.state !== 'running' })
+      return h('div', null,
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-clip-t' }, running.length + ' 个进行中 · ' + done.length + ' 条历史'),
+          h(FcBtn, { onClick: function () { fcRefreshJobs().catch(function () { }) } }, '刷新')),
+
+        LegacyBlock(),
+
+        running.length === 0
+          ? h('div', { className: 'fc-empty' }, '没有正在导出的任务。')
+          : running.map(function (job) { return h(JobCard, { job: job, key: job.id }) }),
+
+        done.length === 0 ? null : h(FcSection, { title: '历史' },
+          done.slice(0, 12).map(function (job) { return h(JobCard, { job: job, key: job.id }) })),
+
+        h('div', { className: 'fc-path' }, '任务记录保存在工作区的 jobs/ 目录，重启后仍在。'))
+    }
+
+    // ── panel ───────────────────────────────────────────────────────────────────
+    function Panel(props) {
+      const wide = !!(props && props.wide)
+      useFcStore()
+      const wrapRef = React.useRef(null)
+      const fillHeight = usePanelFill(wrapRef)
+      React.useEffect(function () {
+        store.mounted = true
+        fcBoot()
+        fcEnsurePolling()
+        return function () { store.mounted = false }
+      }, [])
+      const wrap = 'fc-wrap' + (wide ? ' wide' : '')
+      const tabs = [
+        { id: 'projects', label: '项目' },
+        { id: 'edit', label: '剪辑' },
+        { id: 'merge', label: '合并' },
+        { id: 'jobs', label: '任务' },
+        { id: 'settings', label: '设置' },
+      ]
+      return h('div', { className: 'fc-root' },
+        h('div', {
+          className: wrap,
+          ref: wrapRef,
+          style: fillHeight > 0 ? { maxHeight: fillHeight + 'px', overflowY: 'auto' } : null,
+        },
+          h('div', { className: 'fc-tabs' },
+            tabs.map(function (tab) {
+              const running = tab.id === 'jobs' ? fcRunningJobs().length : 0
+              return h('button', {
+                key: tab.id,
+                className: 'fc-tab' + (store.tab === tab.id ? ' on' : ''), type: 'button',
+                onClick: function () {
+                  store.tab = tab.id
+                  fcEmit()
+                  if (tab.id === 'jobs') fcRefreshJobs().catch(function () { })
+                  if (tab.id === 'merge' && store.browse.path === '') fcBrowse('')
+                },
+              }, tab.label + (running > 0 ? ' · ' + running : ''))
+            })),
+
+          store.notice ? h('div', { className: 'fc-toast' }, store.notice) : null,
+          store.error ? h('div', { className: 'fc-toast err' }, store.error) : null,
+          store.busy ? h('div', { className: 'fc-hint' }, store.busy + '…') : null,
+
+          store.tab === 'edit' ? h(EditView, null) : null,
+          store.tab === 'projects' ? h(ProjectsView, null) : null,
+          store.tab === 'merge' ? h(MergeView, null) : null,
+          store.tab === 'jobs' ? h(JobsView, null) : null,
+          store.tab === 'settings' ? h(SettingsView, null) : null))
+    }
+
+    // ── fallback drawer (non-modal, no backdrop) ────────────────────────────────
+    function Drawer() {
+      const open = useDrawerOpen()
+      React.useEffect(function () {
+        if (!open) return
+        function onKey(event) { if (event.key === 'Escape') setDrawerOpen(false) }
+        window.addEventListener('keydown', onKey)
+        return function () { window.removeEventListener('keydown', onKey) }
+      }, [open])
+      if (!open) return null
+      return h('div', { className: 'fc-root' },
+        h('div', { className: 'fc-drawer', role: 'complementary' },
+          h('div', { className: 'fc-drawer-hd' },
+            h('b', null, FC_TAB_TITLE),
+            h('button', { className: 'fc-x', type: 'button', title: '关闭', onClick: function () { setDrawerOpen(false) } }, '×')),
+          h('div', { className: 'fc-drawer-bd' }, h(Panel, null))))
+    }
+
+    function FooterAction(props) {
+      const wide = !(props && props.wide === false)
+      useFcStore()
+      React.useEffect(function () { fcBoot(); fcEnsurePolling() }, [])
+      const running = fcRunningJobs()
+      const job = running.length > 0 ? running[0] : null
+      const ratio = job && job.progress && typeof job.progress.ratio === 'number' ? Math.round(job.progress.ratio * 100) : null
+      return h('button', {
+        className: wide ? 'fc-entry' : 'fc-entry rail',
+        type: 'button',
+        title: job === null ? FC_TAB_TITLE + ' · 空闲' : '正在导出 ' + (ratio === null ? '' : ratio + '%'),
+        onClick: function () { openPanel() },
+      },
+        h(FcIcon, null),
+        wide ? h('span', { className: 'fc-entry-lb' }, FC_TAB_TITLE) : null,
+        ratio !== null && wide ? h('span', { className: 'fc-entry-pct' }, ratio + '%') : null)
+    }
+
+    // ── 40-views.js ──────────────────────────────────────────────────
+    // ── views: projects, merge, settings ────────────────────────────────────────
+    // The edit view (30-ui.js) works inside one already-open project. These three
+    // cover everything around it: which project is open, how several sources become
+    // one sequence, and where the workspace lives.
+
+    // ── shared: directory picker ────────────────────────────────────────────────
+    // One component serves two jobs (picking .fcproj files and picking media) because
+    // the host returns both from the same listing — the difference is only which
+    // entries are clickable.
+    function FcBrowsePicker(props) {
+      const kind = props.kind === 'project' ? 'project' : 'media'
+      const browse = store.browse
+      const busy = store.busy !== ''
+      const rows = []
+      if (browse.parent) {
+        rows.push(h('div', {
+          key: 'up', className: 'fc-clip', title: browse.parent,
+          onClick: function () { if (!busy) fcBrowse(browse.parent) },
+        }, h('span', { className: 'fc-clip-n' }, '↑'), h('span', { className: 'fc-clip-name' }, '..'), h('span', { className: 'fc-clip-t' }, '上级')))
+      }
+      for (const dir of browse.dirs) {
+        rows.push(h('div', {
+          key: 'd-' + dir.path, className: 'fc-clip', title: dir.path,
+          onClick: function () { if (!busy) fcBrowse(dir.path) },
+        }, h('span', { className: 'fc-clip-n' }, '▸'), h('span', { className: 'fc-clip-name' }, dir.name), h('span', { className: 'fc-clip-t' }, '')))
+      }
+      if (kind === 'project') {
+        for (const path of browse.projects) {
+          rows.push(h('div', {
+            key: 'p-' + path, className: 'fc-clip', title: path,
+            onClick: function () { if (!busy && props.onPick) props.onPick(path) },
+          }, h('span', { className: 'fc-clip-n' }, '+'), h('span', { className: 'fc-clip-name' }, path.split(/[\\/]/).pop()), h('span', { className: 'fc-clip-t' }, '工程')))
+        }
+      } else {
+        for (const file of browse.files) {
+          const staged = fcStagingIndex(file.path) >= 0
+          rows.push(h('div', {
+            key: 'f-' + file.path, className: 'fc-clip' + (staged ? ' on' : ''), title: file.path,
+            onClick: function () { if (!busy) { if (props.onPick) props.onPick(file.path); else fcStage(file.path) } },
+          },
+            h('span', { className: 'fc-clip-n' }, staged ? '✓' : '+'),
+            h('span', { className: 'fc-clip-name' }, file.name),
+            h('span', { className: 'fc-clip-t' }, fcBytes(file.bytes))))
+        }
+      }
+      return h('div', null,
+        h('div', { className: 'fc-row' },
+          h(FcBtn, { onClick: fcBrowseUp, disabled: busy || !browse.parent, title: '上级目录' }, '↑'),
+          h('span', { className: 'fc-clip-name', title: browse.path }, browse.path || '（未选择目录）'),
+          h(FcBtn, { onClick: function () { fcBrowse(browse.path) }, disabled: busy }, '刷新')),
+        rows.length === 0
+          ? h('div', { className: 'fc-empty' }, kind === 'project' ? '这个目录里没有 .fcproj' : '这个目录里没有可导入的素材')
+          : h('div', { className: 'fc-clips' }, rows))
+    }
+
+    // ── projects ────────────────────────────────────────────────────────────────
+    function ProjectsView() {
+      const workspace = store.workspace
+      const busy = store.busy !== ''
+      const pair = React.useState({ mode: '', text: '', name: '' })
+      const form = pair[0]
+      const setForm = function (patch) { pair[1](Object.assign({}, pair[0], patch)) }
+      if (workspace === null) return h('div', { className: 'fc-empty' }, '正在读取工作区…')
+
+      const projects = store.projects || []
+      const existing = projects.filter(function (project) { return project.exists })
+      const missing = projects.filter(function (project) { return !project.exists })
+
+      return h('div', null,
+        h('div', { className: 'fc-stats' },
+          h(FcStat, { label: '工程' }, String(existing.length)),
+          h(FcStat, { label: '缺失' }, String(missing.length)),
+          h(FcStat, { label: '任务' }, String(workspace.counts ? workspace.counts.jobs : 0)),
+          h(FcStat, { label: '版本' }, workspace.version || '?')),
+
+        h('div', { className: 'fc-path' }, '工作区：' + (workspace.rootDisplay || '?')),
+        workspace.cli && workspace.cli.exists === false
+          ? h('div', { className: 'fc-alert' }, '找不到 filmcraft-cli：' + workspace.cli.path)
+          : null,
+
+        h(FcSection, { title: '工程 (' + projects.length + ')' },
+          h('div', { className: 'fc-btns', style: { marginBottom: '6px' } },
+            h(FcBtn, { onClick: fcRescan, disabled: busy }, '重新扫描'),
+            h(FcBtn, {
+              onClick: function () {
+                const next = form.mode === 'add' ? '' : 'add'
+                setForm({ mode: next })
+                if (next === 'add') fcBrowse(store.browse.path || '')
+              },
+            }, '+ 登记已有工程'),
+            h(FcBtn, {
+              onClick: function () {
+                const next = form.mode === 'new' ? '' : 'new'
+                setForm({ mode: next })
+                if (next === 'new' && !store.browse.path) fcBrowse(workspace.paths ? workspace.paths.projects : '')
+              },
+            }, '+ 新建工程')),
+
+          form.mode === '' ? null : h('div', { className: 'fc-note', style: { display: 'block' } },
+            h('div', { className: 'fc-row' },
+              h('span', { className: 'fc-lb' }, '路 径'),
+              h('input', {
+                className: 'fc-inp', value: form.text, placeholder: 'D:\\work\\新工程.fcproj',
+                onChange: function (event) { setForm({ text: event.target.value }) },
+              })),
+            h('div', { className: 'fc-row' },
+              h('span', { className: 'fc-lb' }, '名 称'),
+              h('input', {
+                className: 'fc-inp', value: form.name, placeholder: form.mode === 'new' ? '留空则用文件名' : '可选',
+                onChange: function (event) { setForm({ name: event.target.value }) },
+              })),
+            h('div', { className: 'fc-btns' },
+              h(FcBtn, {
+                primary: true, disabled: busy,
+                onClick: async function () {
+                  const path = form.text.trim()
+                  if (!path) { fcFail('先填一个路径'); return }
+                  if (form.mode === 'new') await fcProjectCreate(path, form.name.trim());
+                  else await fcProjectAdd(path, form.name.trim())
+                  setForm({ mode: '', text: '', name: '' })
+                },
+              }, form.mode === 'new' ? '创建并打开' : '登记并打开'),
+              h(FcBtn, { onClick: function () { setForm({ mode: '' }) } }, '取消')),
+            h('div', { className: 'fc-hint' },
+              form.mode === 'new'
+                ? '引擎不能凭空创建工程文件，」新建」实际是「建空工程 + 立刻导入素材」。建好后到「合并」页放素材。'
+                : '指到一个已存在的 .fcproj 就行。也可以从下面的目录里点选。'),
+            h(FcBrowsePicker, {
+              kind: 'project',
+              onPick: function (path) { setForm({ text: path }) },
+            })),
+
+          projects.length === 0
+            ? h('div', { className: 'fc-empty' }, '还没有工程。点「重新扫描」或「登记已有工程」。')
+            : h('div', { className: 'fc-clips' },
+              projects.map(function (project) {
+                const on = store.detail && store.detail.path && store.detail.path === project.file
+                return h('div', {
+                  key: project.id,
+                  className: 'fc-clip' + (on ? ' on' : ''),
+                  title: project.display,
+                  onClick: function () { if (!busy) fcOpenProject(project.id) },
+                },
+                  h('span', { className: 'fc-clip-n' }, on ? '●' : ''),
+                  h('span', { className: 'fc-clip-name' }, (project.exists ? '' : '⚠ ') + project.name),
+                  h('span', { className: 'fc-clip-t' }, project.exists ? fcBytes(project.bytes) + ' · ' + fcAgo(project.savedAt) : '文件缺失'))
+              }))),
+
+        store.detail === null ? null : h(FcSection, { title: '已打开' },
+          h('div', { className: 'fc-note' },
+            h('span', null, store.detail.name),
+            h('span', { style: { color: 'var(--dim)' } }, (store.detail.sequences || []).length + ' 序列 · rev ' + store.detail.revision)),
+          h('div', { className: 'fc-path' }, store.detail.path),
+          h('div', { className: 'fc-btns' },
+            h(FcBtn, { onClick: function () { store.tab = 'edit'; fcEmit() } }, '进入剪辑'),
+            h(FcBtn, {
+              danger: true, disabled: busy,
+              onClick: function () { fcProjectRemove(store.projectId) },
+              title: '只从列表移除，不删文件',
+            }, '从列表移除'))),
+
+        h('div', { className: 'fc-hint' },
+          '工程按 id 登记在工作区里，编辑时只用 id，不再写死路径 —— 这就是换项目不用改代码的原因。'))
+    }
+
+    // ── merge ───────────────────────────────────────────────────────────────────
+    function MergeView() {
+      const busy = store.busy !== ''
+      const staging = store.staging || []
+      const merge = store.merge
+      const compat = merge.compat
+      const detail = store.detail
+      const mode = merge.createName ? 'new' : (detail ? 'current' : 'new')
+
+      return h('div', null,
+        h(FcSection, { title: '待合并 (' + staging.length + ')' },
+          staging.length === 0
+            ? h('div', { className: 'fc-empty' }, '还没有素材。下面选一段，或从工程素材里加。')
+            : h('div', { className: 'fc-clips' },
+              staging.map(function (path, index) {
+                return h('div', { key: path + index, className: 'fc-clip', title: path },
+                  h('span', { className: 'fc-clip-n' }, String(index + 1)),
+                  h('span', { className: 'fc-clip-name' }, path.split(/[\\/]/).pop()),
+                  h('span', { className: 'fc-btns' },
+                    h(FcBtn, { disabled: busy || index === 0, title: '上移', onClick: function () { fcStageMove(path, -1) } }, '↑'),
+                    h(FcBtn, { disabled: busy || index === staging.length - 1, title: '下移', onClick: function () { fcStageMove(path, 1) } }, '↓'),
+                    h(FcBtn, { danger: true, disabled: busy, title: '移出', onClick: function () { fcUnstage(path) } }, '×')))
+              })),
+          h('div', { className: 'fc-btns', style: { marginTop: '6px' } },
+            h(FcBtn, { disabled: busy || staging.length === 0, onClick: fcUnstageAll }, '清空'))),
+
+        h(FcSection, { title: '添加素材' },
+          h('div', { className: 'fc-btns', style: { marginBottom: '6px' } },
+            h(FcBtn, { disabled: busy, onClick: function () { fcBrowse(store.browse.path || '') } }, '浏览目录'),
+            h(FcBtn, { disabled: busy, title: '用「添加素材」选中的文件' }, '添加到列表')),
+          store.assets.length > 0 ? h('div', null,
+            h('div', { className: 'fc-sub' }, '当前工程素材（点一下加入）：'),
+            h('div', { className: 'fc-chips' },
+              store.assets.map(function (asset) {
+                if (!asset.path) return null
+                const staged = fcStagingIndex(asset.path) >= 0
+                return h('button', {
+                  key: 'a-' + asset.item, className: 'fc-chip' + (staged ? ' on' : ''), type: 'button',
+                  title: asset.path + (asset.online === false ? '（离线）' : ''),
+                  disabled: busy,
+                  onClick: function () { if (staged) fcUnstage(asset.path); else fcStage(asset.path) },
+                }, (asset.online === false ? '⚠ ' : '') + fcShort(asset.name, 16))
+              }).filter(Boolean))) : null,
+          h(FcBrowsePicker, { kind: 'media', onPick: fcStage })),
+
+        h(FcSection, { title: '输出' },
+          h('div', { className: 'fc-row' },
+            h('span', { className: 'fc-lb' }, '目 标'),
+            h('select', {
+              className: 'fc-sel', value: mode, disabled: busy,
+              onChange: function (event) {
+                const next = event.target.value
+                if (next === 'new') { store.merge.createName = merge.createName || fcMergeDefaultName(); store.merge.settings = null }
+                else { store.merge.createName = ''; store.merge.settings = null }
+                fcEmit()
+              },
+            },
+              detail ? h('option', { value: 'current' }, '合并进当前工程：' + fcShort(detail.name, 14)) : null,
+              h('option', { value: 'new' }, '新建工程（推荐）'))),
+
+          mode === 'new' ? h('div', null,
+            h('div', { className: 'fc-row' },
+              h('span', { className: 'fc-lb' }, '工程名'),
+              h('input', {
+                className: 'fc-inp', value: merge.createName, disabled: busy,
+                placeholder: fcMergeDefaultName() || '合并工程',
+                onChange: function (event) { store.merge.createName = event.target.value; fcEmit() },
+              })),
+            h('div', { className: 'fc-row' },
+              h('span', { className: 'fc-lb' }, '目 录'),
+              h('input', {
+                className: 'fc-inp', value: merge.createDir, disabled: busy,
+                placeholder: store.workspace && store.workspace.paths ? store.workspace.paths.projects : '',
+                onChange: function (event) { store.merge.createDir = event.target.value; fcEmit() },
+              }))) : null,
+
+          h('div', { className: 'fc-row' },
+            h('span', { className: 'fc-lb' }, '序列名'),
+            h('input', {
+              className: 'fc-inp', value: merge.name, disabled: busy, placeholder: '合并序列',
+              onChange: function (event) { store.merge.name = event.target.value; fcEmit() },
+            })),
+
+          h('div', { className: 'fc-row' },
+            h('span', { className: 'fc-lb' }, '导 出'),
+            h('label', { className: 'fc-clip-name', style: { display: 'flex', alignItems: 'center', gap: '5px' } },
+              h('input', {
+                type: 'checkbox', checked: merge.exportAfter === true,
+                onChange: function (event) { store.merge.exportAfter = event.target.checked; fcEmit() },
+              }),
+              '合并完直接导出成片（' + Math.round(store.scale * 100) + '% 缩放）')),
+
+          h('div', { className: 'fc-btns', style: { marginTop: '6px' } },
+            h(FcBtn, {
+              primary: true, disabled: busy || staging.length === 0,
+              onClick: function () {
+                fcMergeRun({
+                  name: merge.name,
+                  createName: mode === 'new' ? (merge.createName || fcMergeDefaultName()) : '',
+                  overwrite: false,
+                })
+              },
+            }, '开始合并 (' + staging.length + ' 段)')),
+
+          h('div', { className: 'fc-hint' },
+            '合并 = 把 N 段素材按这个顺序摆到同一条视频轨上（音轨联动），一次 undo 落位。',
+            '引擎没有 ffmpeg 那种无损拼接，所以「合并」的可编辑形态是时间线上的排列，成片靠导出渲染。')),
+
+        compat === null ? null : h(FcSection, { title: '兼容性' },
+          compat.warnings && compat.warnings.length > 0
+            ? compat.warnings.map(function (text, index) {
+              return h('div', { key: 'w' + index, className: 'fc-toast err' }, text)
+            })
+            : h('div', { className: 'fc-toast' }, '检查了 ' + compat.checked + ' 段，尺寸与帧率一致，不会被动缩放。'),
+          compat.rows && compat.rows.length > 0 ? h('div', { className: 'fc-clips' },
+            compat.rows.map(function (row) {
+              return h('div', { key: 'c' + row.index, className: 'fc-clip' },
+                h('span', { className: 'fc-clip-n' }, String(row.index + 1)),
+                h('span', { className: 'fc-clip-name' }, row.name),
+                h('span', { className: 'fc-clip-t' }, row.width + '×' + row.height + ' · ' + row.fps + 'fps'))
+            })) : null),
+
+        merge.result === null ? null : h(FcSection, { title: '结果' },
+          h('div', { className: 'fc-note' },
+            h('span', null, merge.result.project ? merge.result.project.name : ''),
+            h('span', { style: { color: 'var(--dim)' } },
+              (merge.result.sequence ? merge.result.sequence.name : '') +
+              ' · ' + (Array.isArray(merge.result.itemIds) ? merge.result.itemIds.length : 0) + ' 段')),
+          h('div', { className: 'fc-btns' },
+            h(FcBtn, { onClick: function () { store.tab = 'edit'; store.staging = []; store.merge.result = null; fcEmit() } }, '去剪辑'))))
+    }
+
+    // ── settings ────────────────────────────────────────────────────────────────
+    function SettingsView() {
+      const workspace = store.workspace
+      const busy = store.busy !== ''
+      const pair = React.useState({ root: '', cli: '', name: '' })
+      const form = pair[0]
+      const setForm = function (patch) { pair[1](Object.assign({}, pair[0], patch)) }
+      if (workspace === null) return h('div', { className: 'fc-empty' }, '正在读取工作区…')
+      const presets = (workspace.presets || [])
+
+      return h('div', null,
+        h(FcSection, { title: '工作区' },
+          h('div', { className: 'fc-row' },
+            h('span', { className: 'fc-lb' }, '目 录'),
+            h('input', {
+              className: 'fc-inp', value: form.root || workspace.rootDisplay, disabled: busy,
+              onChange: function (event) { setForm({ root: event.target.value }) },
+            })),
+          h('div', { className: 'fc-btns' },
+            h(FcBtn, { primary: true, disabled: busy, onClick: function () { fcSetRoot(form.root || workspace.rootDisplay) } }, '保存并切换'),
+            h(FcBtn, { disabled: busy, onClick: function () { fcSetRoot(workspace.rootDisplay) } }, '还原'),
+            h(FcBtn, { onClick: function () { fcBrowse(form.root || workspace.rootDisplay) } }, '浏览')),
+          h('div', { className: 'fc-hint' },
+            '切换工作区会重建注册表位置（projects/ exports/ jobs/ work/ 都在它下面），已登记的工程不会自动带过去 —— 换回来即可。')),
+
+        h(FcSection, { title: 'CLI' },
+          h('div', { className: 'fc-row' },
+            h('span', { className: 'fc-lb' }, '路 径'),
+            h('input', {
+              className: 'fc-inp', value: form.cli || (workspace.cli ? workspace.cli.path : ''), disabled: busy,
+              onChange: function (event) { setForm({ cli: event.target.value }) },
+            })),
+          h('div', { className: 'fc-btns' },
+            h(FcBtn, { disabled: busy, onClick: function () { fcSetCli(form.cli || (workspace.cli ? workspace.cli.path : '')) } }, '保存'),
+            h(FcBadge, { kind: workspace.cli && workspace.cli.exists ? 'ok' : 'err' },
+              workspace.cli && workspace.cli.exists ? '可达' : '找不到')),
+          h('div', { className: 'fc-hint' }, '每次编辑都会启动一个 filmcraft-cli 进程，改完立即生效。')),
+
+        h(FcSection, { title: '调色预设 (' + presets.length + ')' },
+          h('div', { className: 'fc-clips' },
+            presets.map(function (preset) {
+              return h('div', { key: preset.id, className: 'fc-clip' },
+                h('span', { className: 'fc-g' + (preset.builtin ? ' none' : ''), style: { background: preset.color || 'var(--bar)' } }),
+                h('span', { className: 'fc-clip-name' }, preset.name),
+                h('span', { className: 'fc-clip-t' }, preset.builtin ? '内置' : '自定义'),
+                preset.builtin ? null : h(FcBtn, {
+                  danger: true, disabled: busy, title: '删除这个预设',
+                  onClick: function () { fcPresetRemove(preset.id) },
+                }, '删除'))
+            })),
+          h('div', { className: 'fc-row', style: { marginTop: '6px' } },
+            h('span', { className: 'fc-lb' }, '新预设'),
+            h('input', {
+              className: 'fc-inp', value: form.name, placeholder: '把选中片段的调色另存为…',
+              onChange: function (event) { setForm({ name: event.target.value }) },
+            }),
+            h(FcBtn, {
+              disabled: busy, onClick: async function () {
+                const clip = fcSelectedClip()
+                if (!clip) { fcFail('先到「剪辑」页选一个已调色的片段'); return }
+                let lumetri = null
+                for (const effect of clip.effects || []) if (effect.effect === 'lumetri') lumetri = effect
+                if (!lumetri) { fcFail('这个片段没有调色效果，先套一个预设'); return }
+                const params = {}
+                for (const key of Object.keys(lumetri.params || {})) {
+                  const value = lumetri.params[key]
+                  if (typeof value === 'number' || typeof value === 'boolean') params[key] = value
+                }
+                await fcPresetSave({ name: form.name || '自定义 ' + (presets.length + 1), params: params, color: '#8b949e' })
+                setForm({ name: '' })
+              },
+            }, '另存为')),
+          h('div', { className: 'fc-hint' },
+            '内置预设不可改也不可删。想调整就从片段「另存为」出一个自己的。')),
+
+        h(FcSection, { title: '信息' },
+          h('div', { className: 'fc-path' },
+            '版本 ' + (workspace.version || '?'),
+            h('br'), '注册表 ' + (workspace.paths ? workspace.paths.registry : '?'),
+            h('br'), '导出 ' + (workspace.paths ? workspace.paths.exports : '?'),
+            h('br'), '任务 ' + (workspace.paths ? workspace.paths.jobs : '?'),
+            workspace.legacyRoot ? h('br') : null,
+            workspace.legacyRoot ? '旧版目录 ' + workspace.legacyRoot + '（只读兼容，不再写入）' : null),
+          h('div', { className: 'fc-btns', style: { marginTop: '6px' } },
+            h(FcBtn, { onClick: function () { store.booted = false; fcBoot() } }, '重新读取工作区'))))
+    }
+
+    // ── 99-plugin.js ─────────────────────────────────────────────────
+    // ── plugin ──────────────────────────────────────────────────────────────────
+    // Last module of the client half: this is what `createPlugin()` returns to the
+    // module loader. `apply` is the only entry point — registration happens there and
+    // nowhere at module scope, because the loader evaluates the module before any
+    // context exists.
+
+    return {
+      name: 'filmcraft-progress-client',
+      inject: ['timer'],
+      apply: apply,
+    }
     }
     module.exports = createPlugin()
     return module.exports

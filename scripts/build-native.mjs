@@ -1,40 +1,90 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+// Assembles src/host/*.js and src/client/*.js into dist/native/{index,client}.js.
+//
+// The plugin runs inside the DSH host process, so it cannot import anything but
+// node builtins, and the client half is loaded by the Web GUI's module loader.
+// Rather than force each half into one giant file, the halves are written as
+// numbered modules that are concatenated **in filename order** and share one
+// scope.  That keeps modules file-scoped for editing while producing the single
+// function body the loader needs.
+//
+// Rules for module authors:
+//   · top-level `const`/`function` in a module is visible to every later module
+//     of the same half — do not redeclare a name in two modules
+//   · no `import`/`export` inside a module; the injected names below are already
+//     in scope on the host side
+//   · module order is the dependency order
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const host = readFileSync(join(root, 'src', 'dynamic', 'host.js'), 'utf8').trimEnd()
-const client = readFileSync(join(root, 'src', 'dynamic', 'client.js'), 'utf8').trimEnd()
-const nativeDir = join(root, 'dist', 'native')
-const indent = (value, spaces) => value.split('\n').map((line) => ' '.repeat(spaces) + line).join('\n')
-
 const PKG = 'dsh-filmcraft-progress'
 const BASE = '/dsh-filmcraft-progress/api'
 
-// Every host handler and the HTTP route that exposes it.  GET for reads,
-// POST for anything that edits a project or starts work.
-// kind 'raw' means the handler writes the response itself (binary media).
-const ROUTES = [
-  ['progress.state', 'GET', BASE + '/state', 'json'],
-  ['edit.projects', 'GET', BASE + '/projects', 'json'],
-  ['edit.open', 'POST', BASE + '/open', 'json'],
-  ['edit.apply', 'POST', BASE + '/apply', 'json'],
-  ['edit.undo', 'POST', BASE + '/undo', 'json'],
-  ['edit.export', 'POST', BASE + '/export', 'json'],
-  ['edit.frame', 'POST', BASE + '/frame', 'json'],
-  ['edit.proxy', 'POST', BASE + '/proxy', 'json'],
-  ['edit.media', 'GET', BASE + '/media', 'raw'],
-]
+const indent = (value, spaces) => value.split('\n').map((line) => (line ? ' '.repeat(spaces) + line : line)).join('\n')
 
-// `type: 'json'` is not a valid JSON-Schema type — widen it.
-const hostBody = host.replaceAll("schema: { type: 'json' }", "schema: { type: 'object', additionalProperties: true }")
+function readModules(dir) {
+  const abs = join(root, 'src', dir)
+  let names
+  try {
+    names = readdirSync(abs).filter((n) => n.endsWith('.js')).sort()
+  } catch (_) {
+    throw new Error('missing module directory: src/' + dir)
+  }
+  if (names.length === 0) throw new Error('no modules in src/' + dir)
+  return names.map((name) => {
+    const body = readFileSync(join(abs, name), 'utf8').trimEnd()
+    return { name, body }
+  })
+}
+
+// Every host handler and the HTTP route that exposes it.  GET for reads, POST
+// for anything that edits a project or starts work.  kind 'raw' means the
+// handler writes the response itself (binary media).
+const ROUTES = [
+  // ── legacy progress contract ────────────────────────────────────────────
+  ['state.read', 'GET', BASE + '/state', 'json'],
+  // ── workspace / registry ────────────────────────────────────────────────
+  ['workspace.read', 'GET', BASE + '/workspace', 'json'],
+  ['workspace.write', 'POST', BASE + '/workspace', 'json'],
+  ['projects.list', 'GET', BASE + '/projects', 'json'],
+  ['projects.write', 'POST', BASE + '/projects', 'json'],
+  // ── one project ─────────────────────────────────────────────────────────
+  ['project.read', 'GET', BASE + '/project', 'json'],
+  ['project.write', 'POST', BASE + '/project', 'json'],
+  ['assets.read', 'GET', BASE + '/assets', 'json'],
+  ['browse.read', 'GET', BASE + '/browse', 'json'],
+  ['presets.write', 'POST', BASE + '/presets', 'json'],
+  // ── editing ─────────────────────────────────────────────────────────────
+  ['import.write', 'POST', BASE + '/import', 'json'],
+  ['sequence.write', 'POST', BASE + '/sequence', 'json'],
+  ['merge.write', 'POST', BASE + '/merge', 'json'],
+  ['edit.write', 'POST', BASE + '/edit', 'json'],
+  ['grade.write', 'POST', BASE + '/grade', 'json'],
+  ['undo.write', 'POST', BASE + '/undo', 'json'],
+  // ── jobs ────────────────────────────────────────────────────────────────
+  ['export.write', 'POST', BASE + '/export', 'json'],
+  ['jobs.read', 'GET', BASE + '/jobs', 'json'],
+  ['jobs.write', 'POST', BASE + '/jobs', 'json'],
+  // ── preview / binary ────────────────────────────────────────────────────
+  ['frame.read', 'POST', BASE + '/frame', 'json'],
+  ['proxy.write', 'POST', BASE + '/proxy', 'json'],
+  ['media.read', 'GET', BASE + '/media', 'raw'],
+]
 
 const routeTable = '{\n' + ROUTES
   .map(([key, method, path, kind]) => `      '${key}': { method: '${method}', path: '${path}', kind: '${kind}' },`)
   .join('\n') + '\n    }'
 
+const hostModules = readModules('host')
+// `type: 'json'` is not a valid JSON-Schema type — widen it.
+const hostBody = hostModules
+  .map((m) => '// ── ' + m.name + ' '.padEnd(Math.max(2, 66 - m.name.length), '─') + '\n' + m.body)
+  .join('\n\n')
+  .replaceAll("schema: { type: 'json' }", "schema: { type: 'object', additionalProperties: true }")
+
 const nativeHost = [
-  "import { readFileSync, statSync, existsSync, readdirSync, openSync, closeSync, writeFileSync, mkdirSync, copyFileSync, rmSync } from 'node:fs'",
+  "import { readFileSync, statSync, existsSync, readdirSync, mkdirSync, writeFileSync, appendFileSync, openSync, closeSync, copyFileSync, renameSync, rmSync, unlinkSync } from 'node:fs'",
   "import { spawnSync, spawn } from 'node:child_process'",
   '',
   'function defineTool(options) {',
@@ -77,6 +127,7 @@ const nativeHost = [
   'function registerRoute(ctx, route, handler, label) {',
   '  return ctx.effect(() => ctx.webServer.register({',
   "    kind: 'exact',",
+  '    method: route.method,',
   '    path: route.path,',
   '    async handler(req, res) {',
   "      if (route.kind === 'raw') {",
@@ -95,7 +146,10 @@ const nativeHost = [
   "      if (req.method !== route.method) return send(405, { error: 'method not allowed' })",
   '      try {',
   "        const body = req.method === 'POST' ? await readBody(req) : null",
-  '        send(200, await handler(body))',
+  "        const query = new URLSearchParams((req.url || '').split('?')[1] || '')",
+  '        const merged = Object.assign({}, body || {})',
+  '        for (const [k, v] of query.entries()) if (merged[k] === undefined) merged[k] = v',
+  '        send(200, await handler(merged))',
   '      } catch (error) {',
   "        send(500, { error: error instanceof Error ? error.message : String(error) })",
   '      }',
@@ -116,8 +170,8 @@ const nativeHost = [
   "      if (route === undefined) throw new Error('unsupported handler: ' + key)",
   "      const label = '" + PKG + ": ' + key",
   '      // Raw routes write the response themselves and need (req, res); JSON',
-  '      // routes only ever get the parsed body.  Wrapping the raw ones in',
-  "      // (body) => handler(body || {}) would hand them res === undefined.",
+  '      // routes only ever get the merged body/query object.  Wrapping the raw',
+  "      // ones in (body) => handler(body || {}) would hand them res === undefined.",
   "      if (route.kind === 'raw') return registerRoute(ctx, route, handler, label)",
   '      return registerRoute(ctx, route, (body) => handler(body || {}), label)',
   '    },',
@@ -130,6 +184,11 @@ const nativeHost = [
 const clientRoutes = '{\n' + ROUTES
   .map(([key, method, path]) => `        '${key}': ['${method}', '${path}'],`)
   .join('\n') + '\n      }'
+
+const clientModules = readModules('client')
+const clientBody = clientModules
+  .map((m) => '    // ── ' + m.name + ' '.padEnd(Math.max(2, 62 - m.name.length), '─') + '\n' + indent(m.body, 4))
+  .join('\n\n')
 
 const nativeClient = [
   'window.__ModuleLoader__.load({',
@@ -171,8 +230,17 @@ const nativeClient = [
   "          init.method = 'POST'",
   "          init.headers = { 'content-type': 'application/json' }",
   '          init.body = JSON.stringify(arg || {})',
+  '        } else if (arg) {',
+  '          var qs = []',
+  '          for (var k in arg) {',
+  '            if (Object.prototype.hasOwnProperty.call(arg, k) && arg[k] !== undefined && arg[k] !== null) {',
+  "              qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(arg[k]))",
+  '            }',
+  '          }',
+  "          if (qs.length > 0) init.cache = 'no-store'",
   '        }',
-  '        var response = await fetch(route[1], init)',
+  '        var url = route[0] === \'POST\' ? route[1] : host.url(name, arg)',
+  '        var response = await fetch(url, init)',
   '        var value = await response.json()',
   "        if (!response.ok) throw new Error(value && value.error ? value.error : 'request failed')",
   '        return value',
@@ -189,7 +257,7 @@ const nativeClient = [
   '      },',
   '    }',
   '    function createPlugin() {',
-  indent(client, 6),
+  clientBody,
   '    }',
   '    module.exports = createPlugin()',
   '    return module.exports',
@@ -198,11 +266,12 @@ const nativeClient = [
   '',
 ].join('\n')
 
+const nativeDir = join(root, 'dist', 'native')
 mkdirSync(nativeDir, { recursive: true })
 writeFileSync(join(nativeDir, 'index.js'), nativeHost, 'utf8')
 writeFileSync(join(nativeDir, 'client.js'), nativeClient, 'utf8')
 console.log('Built ' + PKG)
-console.log('  dist/native/index.js   ' + nativeHost.length + ' B')
-console.log('  dist/native/client.js  ' + nativeClient.length + ' B')
+console.log('  dist/native/index.js    ' + nativeHost.length + ' B  (' + hostModules.length + ' modules)')
+console.log('  dist/native/client.js   ' + nativeClient.length + ' B  (' + clientModules.length + ' modules)')
 console.log('  routes:')
 for (const [key, method, path] of ROUTES) console.log('    ' + method.padEnd(5) + path + '   (' + key + ')')

@@ -1,86 +1,74 @@
 # dsh-filmcraft-progress
 
-> A [DeepSeek Harness](https://github.com/anywhere-labs/deepseek-harness-desktop) plugin that shows
-> **live FilmCraft video-editing / colour-grading progress** in the GUI — and lets you do
-> **basic cutting without leaving DSH**: trim, delete, reorder, grade, export.
+> A generic [DeepSeek Harness](https://github.com/anywhere-labs/deepseek-harness-desktop) plugin for
+> **FilmCraft video editing** — many projects, many sequences, per-clip processing, and merging
+> several videos into one timeline, all from a docked sidebar tab.
 
-DSH 面板插件：**实时查看 FilmCraft 视频剪辑 / 调色的进度，并直接做基础剪辑**。
+DSH 面板插件：**通用 FilmCraft 剪辑台**。不是一个项目专用的脚本，而是一层「工程 / 序列 / 素材 /
+片段 / 任务」的通用模型 —— 换项目、换机器、换素材目录都不用改代码。
 
-右侧栏一个常驻标签，两页：
+右侧栏一个常驻标签，五页：
 
-- **进度** —— 导出百分比、已用时、预计剩余、写入速度、输出大小、片段表、调色参数。
-  数据来自本地文件采样，不占用剪辑进程。
-- **剪辑** —— 打开 `.fcproj` 工程，**看画面**（单帧预览 / 缩略图 / 预览片段），
-  裁头/裁尾、删除、上下移、套调色、撤销、导出。
+| 页 | 干什么 |
+|---|---|
+| **项目** | 注册表里所有 `.fcproj`：打开、重新扫描、登记已有、新建、移除 |
+| **剪辑** | 打开工程后的工作区：序列、画面预览、片段表、裁切/排序/停用/删除、单段与**批量**调色、素材导入与放置、导出 |
+| **合并** | 把 N 段素材排成一列 → 建成新工程/新序列（或并进当前工程），可选合并完直接出片 |
+| **任务** | 导出任务队列：百分比、已用时、剩余、写入速度、取消、清记录 |
+| **设置** | 工作区目录、CLI 路径、调色预设增删、路径与版本信息 |
 
 ```
-┌──────────────────────────────────────────────────────┐
-│ [ 进度 ] [ 剪辑 ]                                    │
-│ FilmCraft 剪辑进度                        ● 导出中   │
-│ 逐段调色 · 3840×2880 · 33 段素材                     │
-├──────────────────────────────────────────────────────┤
-│ ████████████████████████░░░░░░░░░░░░░░░░░░░  51.3%   │
-│ 按输出文件大小估算                                   │
-├──────────────────────────────────────────────────────┤
-│ 已用时 54:28 │ 预计剩余 46:40 │ 0.78 MB/s │ 1395/2900 MB │
-├──────────────────────────────────────────────────────┤
-│ 片段表 (33)  #1 0310 山路 7.6s 已完成                 │
-│              #2 0319 海景 8.0s 导出中                 │
-│              #3 0322 海景 8.0s 待处理   …             │
-└──────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ [ 项目 ] [ 剪辑 ] [ 合并 ] [ 任务 ] [ 设置 ]        │
+│ 工程 12   缺失 0   任务 1   版本 0.3.0              │
+│ 工作区：D:\Myfiles\FilmCraft                        │
+├────────────────────────────────────────────────────┤
+│ 工程 (12)                                          │
+│ [重新扫描] [+ 登记已有工程] [+ 新建工程]            │
+│ ┌────────────────────────────────────────────────┐ │
+│ │ ● 深圳天文台          1.4 MB · 3 小时前         │ │
+│ │   品牌片合集          820 KB · 昨天             │ │
+│ │   合并工程            1.1 MB · 刚刚             │ │
+│ └────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────┘
 ```
 
-## 两种模式
+## 为什么是「重构」而不是加功能
 
-任务分两类，面板按 `mode` 字段换版式 —— 它们不是同一件事：
+0.2.x 是给**某一个项目**写的：工程路径、导出目录、四套调色配方、预览的 4:3 比例、
+只认 `V1` 一条轨、一个全局状态文件（同时只能有一个任务）—— 全部写死在代码里。
 
-| 模式 | 是什么 | 面板怎么显示 |
-|---|---|---|
-| `batch` | **逐段调色**：每条素材各自调色、各自导出一个文件 | 「片段表」+ 每段自己的状态（待处理/导出中/已完成/失败）、时长、帧率 |
-| `film` | **成片剪辑**：多段剪成一条时间线 | 「分镜表」+ 成片时间码、裁剪标记 |
+0.3.0 把这些全部换成数据：
 
-## 剪辑页
-
-右侧栏面板的第二个标签，用来处理「基本问题」：
-
-### 预览画面
-
-盲剪没有意义，所以剪辑页会显示**调色之后**的画面：
-
-| 位置 | 内容 |
+| 0.2.x 写死的东西 | 0.3.0 变成 |
 |---|---|
-| **主预览** | 选中片段后自动渲染该片段中点的一帧，`4:3` 画框（源片就是 3840×2880） |
-| **时间轴** | 滑块拖到片段内任意位置看那一帧（420 ms 防抖），`◀ ▶` 每次 0.5 秒 |
-| **缩略图** | 片段列表每行一张，后台**一次渲染一张**慢慢补，不阻塞面板 |
-| **预览片段** | 导出真实视频，`<video controls loop>` 播放、可拖进度条。长度自己填（0.5–20 秒），或点「整段」按当前片段时长 |
+| `STATUS_PATH` 一个状态文件 | 任务注册表，N 个任务，各有 id / 状态 / 进度 |
+| 工程路径常量 | 工程注册表（id ↔ 文件），可增删、可换工作区 |
+| 一个工程 = 一支片 | 工程内 `sequences[]` + 当前序列，导出/预览都带序列 id |
+| 没有素材层 | 素材表：路径、在线状态、指纹、宽高、帧率、代理 |
+| 四个写死的调色配方 | 预设系统：内置只读 + 自定义可存可删 |
+| 4:3 预览 | 预览按素材真实宽高比 |
+| 只认第一条视频轨 | 所有视频轨 + 音频轨，带 `V1/A1` 标签 |
+| 逐条 move 拼坐标做「合并」 | 一等的合并操作：按数组顺序一次落位，算一个 undo |
 
-渲染走 `filmcraft-cli render`（单帧）和 `export --format h264 --no-audio`（片段），
-结果按**工程 mtime** 缓存到磁盘：同一帧第二次是毫秒级，改了工程则自动失效。
+## 合并是怎么做的
 
-> **代价**：单帧是解码+调色决定的，和 `--scale` 几乎无关（实测 0.3–1.8 秒/帧，
-> 取决于源文件是否还在系统缓存里）；预览片段约 0.13 秒/帧。所以缩略图必须排队慢慢来 ——
-> 33 段一起发就是 45 秒的突发。拖动时间轴时新请求会**合并成只保留最新**，
-> 否则每个中间位置都要排一次 1 秒多的渲染。
+**引擎没有 concat/append 命令，机器上也没有 ffmpeg**，所以「合并」不是拼文件，而是：
 
-> **为什么串行**：`filmcraft-cli` 一次调用一个进程，而并发跑同一工程之前产出过损坏
-> 文件。host 侧对预览工作加了锁。
+```
+导入 N 段素材 → file.newSequence → timeline.place{items:[...], track:'V1', audioTrack:'A1', time:0}
+```
 
-### 剪辑操作
+`timeline.place` 按**数组顺序**首尾相接、音视频联动，并且是**一个 undo 步**。合并的可编辑性
+是文档层的事实：源素材、入点、时长都还在时间线上，随时能改。成片靠导出渲染 —— 这是唯一
+诚实的做法，`copy /b` 那种拼法会毁掉 moov atom。
 
-| 操作 | 说明 |
-|---|---|
-| **扫描 / 打开工程** | 扫描配置目录下的 `.fcproj`（默认 `D:\Myfiles\临时`） |
-| **裁头 / 裁尾** | ±0.5s / +1s / +3s，波纹模式（自动合拢，不留空隙） |
-| **删除** | 波纹删除选中片段 |
-| **上移 / 下移** | 与相邻片段交换位置 |
-| **套调色** | 海景 / 山路 / 猫 / 中性 / 清空 —— 与批处理流水线同一套参数 |
-| **停用 / 启用** | 保留片段但不参与输出 |
-| **撤销** | 还原到上一次编辑前的工程快照 |
-| **导出** | 选中片段或整条序列，后台跑，回「进度」页看百分比 |
+合并前会做**兼容性预检**：把每段素材的宽高和帧率与目标序列比一遍，不一致就提前告诉你
+「X 段素材尺寸不同，导出时会被缩放或补边」「Y 段帧率不同，将被重采样」—— 而不是等你渲染完
+才发现画面被裁了。
 
-> **为什么撤销用快照**：`filmcraft-cli` 每次调用都是独立进程，撤销栈随进程结束消失，
-> `--save` 存的是结果不是历史。所以每次编辑前把工程复制一份到 `snapshots/`
-> （保留最近 20 份），撤销即还原最新快照。这比 CLI 自带的 undo 可靠。
+想把合并结果交给别的剪辑软件继续做，用 `project.write{action:'exportInterchange'}` 导出
+EDL / FCP7 XML / FCPXML / OTIO / AAF —— 渲染好的 mp4 里没有剪切点，工程文件才有。
 
 ## 安装
 
@@ -109,6 +97,16 @@ node "<DSH>/resources/runtime/pnpm/bin/pnpm.cjs" install
 
 > 本仓库的 `dist/` 是**提交进版本库**的，所以从 git 安装不需要自己构建。
 
+### 宿主端与客户端要分开重启
+
+这是 0.3.0 开发中最耽误时间的一处：
+
+| 改了什么 | 怎么生效 |
+|---|---|
+| `src/client/**`（面板界面） | 刷新网页 |
+| `src/host/**`（工具、路由、引擎调用） | **必须重启 DSH** —— 宿主端是在宿主进程里跑的，热加载管不到 |
+| `scripts/build-native.mjs` | 先 `npm run build`，再按上面两行 |
+
 ## 在哪里看
 
 主界面是**右侧栏的一个常驻标签**——它和 DSH 自带的右侧面板并排，**不遮挡主界面**，
@@ -116,199 +114,147 @@ node "<DSH>/resources/runtime/pnpm/bin/pnpm.cjs" install
 
 | 位置 | 内容 |
 |---|---|
-| **右侧栏标签**「剪辑进度」 | 完整面板：**进度**页 + **剪辑**页 |
-| **左侧栏底部入口** | 点一下打开上面的右侧栏标签；任务运行时直接显示百分比 |
-| **设置 → 剪辑进度** | 同一个面板，宽屏版式 |
+| **右侧栏标签**「剪辑」 | 完整面板：项目 / 剪辑 / 合并 / 任务 / 设置 |
+| **左侧栏底部入口** | 点一下打开上面的右侧栏标签；有任务在跑时直接显示百分比 |
+| **设置 → 剪辑** | 同一个面板，宽屏版式 |
 
 > 只有当宿主的右侧栏服务（`sidebarRightTabs` / `sidebarRight`）不可用时，才降级为
 > **右侧停靠的抽屉**：窄条、**没有全屏遮罩**，`Esc` 或 `×` 关闭。正常情况下面板
 > 在 `shell.overlay` 座位上渲染 `null`，不会画任何东西盖住主界面。
 
-## 数据从哪来
+## 数据放在哪
 
-面板**不**去问 FilmCraft 要进度（它没有进度接口）。它读一个「进度契约文件」，
-再自己从输出文件实时采样算百分比和速度：
-
-```
-进度文件 → 项目名 / 阶段 / 镜头表 / 调色参数 / 期望时长
-    +
-输出 mp4 → 当前字节数、修改时间（推 速度、ETA、是否还在跑）
-```
-
-默认路径 `D:\Myfiles\临时\film-status.json`，可用环境变量覆盖：
+工作区默认 `D:\Myfiles\FilmCraft`（可换，见下表），结构：
 
 ```
-FILMCRAFT_PROGRESS_FILE=D:\别的\地方\film-status.json
+<root>/
+  workspace.json     工程注册表 + 预设 + 设置
+  projects/          合并时新建的工程
+  exports/           导出成片
+  jobs/<id>.json     任务记录（重启后仍在）
+  snapshots/         每次编辑前的工程快照（撤销用，保留最近 20 个）
+  work/              日志、渲染校准数据
+  previews/          预览帧与短预览片段（保留最近 240 个）
 ```
 
-### 进度契约字段
+覆盖方式：`~/.dsh/filmcraft-progress/config.json` 里的 `root` / `cliPath` / `scanDepth`，
+或在面板「设置」页直接改。
 
-```jsonc
-{
-  "mode": "batch",                // batch=逐段调色 | film=成片剪辑（缺省按 film 处理）
-  "project": "深圳天文台 · 调色成片",
-  "phase": "export",              // idle|plan|import|build|grade|crop|export|done|error
-  "phaseLabel": "导出中",
-  "message": "软件 H.264 编码",
-  "startedAt": "2026-10-14T10:17:19.000Z",
-  "expectedMs": 6067000,          // 期望总耗时，用于时间法 ETA
-  "export": {
-    "path": "D:\\...\\成片.mp4",
-    "expectedBytes": 3040870400   // 期望文件大小，用于字节法百分比
-  },
-  "video":   { "width": 3840, "height": 2880, "fps": 25, "codec": "H.264 High" },
-  "timeline":{ "width": 3840, "height": 2880, "fps": 25, "durationSeconds": 224.72, "shotCount": 29 },
-  "stats":   { "trail": 9, "sea": 19, "cat": 1 },
-  "grades":  { "sea": { "contrast": 30, "...": 0 }, "trail": { "...": 0 } },
-  "shots":   [ { "n": 1, "tag": "0310", "cat": "trail", "start": 0, "dur": 6, "crop": false } ],
-  "notes":   ["帧率统一 25fps"]
-}
-```
-
-只有 `project` 和 `export.path` 是必需的。百分比优先用
-`bytes / expectedBytes`，没有就退回 `elapsed / expectedMs`。
-
-`mode: "batch"` 时，`shots[]` 每项建议带 `status`（`pending` / `exporting` / `done` / `failed`）
-与 `fps`，面板据此画每段自己的状态徽标。
-
-## 怎么写入进度
-
-用自带工具 `tools/publish.cjs`：
-
-```bash
-# 开工：从剪辑方案生成完整进度
-node tools/publish.cjs start --project "深圳天文台" \
-  --out "D:\Myfiles\临时\成片\成片.mp4" \
-  --plan "D:\Myfiles\临时\build\plan.json" \
-  --width 3840 --height 2880 --fps 25 \
-  --expected-bytes 3040870400 --realtime 27
-
-# 阶段流转
-node tools/publish.cjs phase grade "正在调色"
-node tools/publish.cjs phase export
-node tools/publish.cjs done
-node tools/publish.cjs error "磁盘空间不足"
-
-# 其它
-node tools/publish.cjs note  "0319 已裁剪"
-node tools/publish.cjs patch '{"notes":["..."]}'
-node tools/publish.cjs show
-```
-
-`--plan` 指向剪辑方案 JSON（数组，每项含 `tag` `cat` `tlStart` `dur` `srcIn` `crop`），
-`start` 会据此自动生成 `shots` / `stats` / `timeline.durationSeconds`。
+首次运行会把旧版目录 `D:\Myfiles\临时` 里的 `.fcproj` **一次性**登记进注册表，之后不再读写
+那个目录（除了只读地展示旧版状态文件）。
 
 ## Agent 工具
 
-插件注册了两个工具，Agent 可以直接用：
+两个工具，都在宿主侧注册：
 
-**`filmcraft_progress`** —— 读同一份进度状态：
+### `filmcraft_progress`
 
-```json
-{ "ok": true, "percent": 51.3, "etaText": "46:40", "mode": "batch", "shots": [ ... ] }
-```
+查看导出/渲染的实时进度：任务队列（百分比、已用时、预计剩余、输出大小与速度）+ 旧版状态
+文件（如果有）。唯一能**主动采样**进度的入口。
 
-**`filmcraft_edit`** —— 基础剪辑，`action` 取 `projects` / `open` / `apply` / `undo` / `export` / `frame` / `proxy`：
+### `filmcraft_edit`
 
-```jsonc
-// 看有哪些工程
-{ "action": "projects" }
+一个工具 16 个 action：
 
-// 打开并列出片段
-{ "action": "open", "project": "D:\\...\\final.fcproj" }
-
-// 把第 1 段头部裁掉 1 秒（254016000000 ticks = 1 秒）
-{ "action": "apply", "project": "D:\\...\\final.fcproj",
-  "commands": [{ "id": "timeline.trim",
-                 "params": { "clip": 69, "edge": "in", "mode": "ripple", "delta": 254016000000 } }] }
-
-// 撤销 / 导出
-{ "action": "undo", "project": "D:\\...\\final.fcproj" }
-{ "action": "export", "project": "D:\\...\\final.fcproj", "out": "D:\\out.mp4", "start": 0, "end": 12 }
-
-// 看画面：渲染第 3 秒的一帧（返回 name，用 /media?name= 取二进制）
-{ "action": "frame", "project": "D:\\...\\final.fcproj", "seconds": 3, "scale": 0.25 }
-
-// 导出一段 3 秒预览视频
-{ "action": "proxy", "project": "D:\\...\\final.fcproj", "start": 10, "end": 13, "quality": 60 }
-```
-
-`apply` 只接受白名单内的命令（剪辑与调色相关），不是 700 条命令的遥控器。
+| action | 用途 |
+|---|---|
+| `workspace` | 工作区、路径、预设、计数 |
+| `projects` | 工程列表 |
+| `open` | 打开并返回工程详情（序列、素材、片段、效果） |
+| `assets` | 工程素材（含在线状态、指纹、宽高、帧率） |
+| `browse` | 浏览目录（返回子目录、可导入文件、`.fcproj`） |
+| `import` | 导入素材到工程（`place:true` 则同时建序列并落位） |
+| `sequence` | 激活/新建/删除/重命名序列 |
+| `merge` | **合并**：`sources:[{item|file}]` 按顺序拼成新序列（可 `create:{name}` 建新工程） |
+| `apply` | 执行白名单命令（`dryRun:true` 只返回将要执行的命令） |
+| `grade` | 套调色预设（`clear:true` 清空） |
+| `undo` | 撤销一步（回到上一个快照） |
+| `export` | 导出（后台任务，返回 job id） |
+| `jobs` | 任务列表 |
+| `cancel` | 取消任务 |
+| `frame` | 渲染单帧 PNG |
+| `proxy` | 渲染短预览片段 |
 
 ## HTTP 接口
 
-Host 注册了这些路由（面板走同一批）：
+22 条路由，前缀 `/dsh-filmcraft-progress/api`：
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/dsh-filmcraft-progress/api/state` | 进度状态 |
-| GET | `/dsh-filmcraft-progress/api/projects` | 扫描工程文件 |
-| POST | `/dsh-filmcraft-progress/api/open` | 打开工程并列出片段 |
-| POST | `/dsh-filmcraft-progress/api/apply` | 执行编辑（白名单） |
-| POST | `/dsh-filmcraft-progress/api/undo` | 还原工程快照 |
-| POST | `/dsh-filmcraft-progress/api/export` | 后台导出 |
-| POST | `/dsh-filmcraft-progress/api/frame` | 渲染一帧画面（PNG） |
-| POST | `/dsh-filmcraft-progress/api/proxy` | 导出短预览片段（MP4） |
-| GET | `/dsh-filmcraft-progress/api/media?name=<文件>` | 二进制回读画面/视频，支持 Range |
-
-`/media` 只接受**纯文件名**（`^[A-Za-z0-9_.-]{1,80}$`，不含分隔符），从预览目录里读；
-路径穿越、绝对路径一律 400，文件不存在 404。`<video>` 拖动进度条依赖它返回 206。
-
-可用环境变量覆盖：`FILMCRAFT_CLI`（CLI 路径）、`FILMCRAFT_ROOTS`（扫描根目录，`;` 分隔）、
-`FILMCRAFT_EXPORT_DIR`、`FILMCRAFT_LOG_DIR`、`FILMCRAFT_PROGRESS_FILE`、
-`FILMCRAFT_PREVIEW_DIR`（预览缓存目录，默认 `<LOG_DIR>\preview`，保留最近 120 个文件）。
+| GET | `/state` | 旧版状态文件（只读兼容） |
+| GET/POST | `/workspace` | 工作区；`setRoot` / `setCli` / `updateSettings` / `seedLegacy` |
+| GET/POST | `/projects` | 工程列表；`add` / `remove` / `rename` / `rescan` |
+| GET/POST | `/project` | 工程详情；`activate` / `createSequence` / `deleteSequence` / `renameSequence` / `exportInterchange` |
+| GET | `/assets` | 工程素材 |
+| GET | `/browse` | 目录浏览 |
+| POST | `/presets` | `save` / `remove` / `reset` |
+| POST | `/import` | 导入素材；`place:true` 放置 |
+| POST | `/sequence` | `create` / `activate` / `delete` / `rename` |
+| POST | `/merge` | 合并 |
+| POST | `/edit` | 白名单命令 |
+| POST | `/grade` | 调色 |
+| POST | `/undo` | 撤销 |
+| POST | `/export` | 导出任务 |
+| GET/POST | `/jobs` | 任务列表；`cancel` / `remove` |
+| POST | `/frame` | 单帧 |
+| POST | `/proxy` | 短预览 |
+| GET | `/media` | 预览产物（支持 Range） |
 
 ## 设计要点
 
-- **两个界面、一个降级**：优先注册官方右侧栏标签（`sidebar.right.pane.tab`），
-  拿不到服务时退回非模态抽屉。座位回调里要**短轮询** `ctx.get('sidebarRightTabs')` /
-  `ctx.get('sidebarRight')`——座位声明早于服务就绪，启动竞态下直接取会拿到 `undefined`。
-- **单一轮询源**：侧栏入口、右侧栏标签、抽屉、设置页共用一个 2 秒轮询，不是四份。
-- **不阻塞剪辑**：只做 `readFileSync` / `statSync`，不起子进程。
-- **首轮 rate 为空**：速度需要两次采样才能算，第二次轮询后才有值。
-- **`running` 判定**：输出文件 30 秒内被写过即视为运行中；完成后自动转「已完成」。
-- **主进程/客户端分离**：Host 注册 HTTP 路由 `/dsh-filmcraft-progress/api/state`，
-  Client 用 `slots` 挂 UI —— 和 `dsh-agent-ssh-dashboard` 同一套模式。
-- **二进制走 `raw` 路由**：画面/视频以二进制从 `/media` 返回，不是 base64 塞进 JSON。
-  `scripts/build-native.mjs` 的 `ROUTES` 表每项是 `[key, method, path, kind]`，
-  `kind` 取 `json` 或 `raw`；`raw` 路由原样拿到 `(req, res)` 自己写响应。
-  注意 `harness.handle` 不能把 raw 路由也包成 `(body) => handler(body || {})` ——
-  那样 `res` 会是 `undefined`（0.2.2 踩过，`/media` 直接 500）。
-- **预览缓存的键是「工程 mtime + 时间点 + 缩放」**：不引入文件监听，
-  改了工程 mtime 自然变化，旧帧自动不可达，再由 `prunePreview()` 保留最近 120 个。
+- **时间一律整数 tick**（`254016000000` = 1 秒）。浮点秒会在拼接处累积漂移。
+- **只用 id 引用，不用下标**。片段、序列、素材全都带 id；「第 N 个片段」这种引用在
+  ripple/insert 后会指错人。
+- **编辑 = 一条命令数组 = 一个 undo 步**。超 250 条自动分块，每块仍是独立 undo 步。
+- **导出永远串行**。并发渲染会写坏同一个输出文件；预览渲染也走单条 Promise 链。
+- **ETA 算不出就返回 `null`**，面板显示「进度未知」，不编数字。导出速度靠自校准
+  （记录每帧真实耗时，按 `scale²` 归一化）。
+- **宿主端不阻塞**。编辑用 `spawnSync`（天然串行），导出和预览用异步 `spawn`。
+- **子进程输出必须写真实 fd**。宿主进程里 `spawnSync` 的 piped stdio 会 `EPERM`，
+  所以日志走 `openSync(logFile,'w')` 拿到 fd 再传进去。
+- **白名单命令必须对着 `filmcraft-cli commands --json` 核过**。0.2.5 的白名单里
+  33 条有 14 条是不存在的命令 id（`edit.extract`、`clip.toggleEnabled`、`marker.add`…），
+  改之前先跑一遍命令表。
 
 ## 重新构建
 
 ```bash
-node scripts/build-native.mjs
+npm run build     # = node scripts/build-native.mjs
 ```
 
-把 `src/dynamic/{host,client}.js` 打包成 `dist/native/{index.js,client.js}`。
-Host 侧由构建脚本注入 `node:fs` 导入和 HTTP 路由外壳；Client 侧包成
-`window.__ModuleLoader__.load({...})`。
+构建把 `src/host/*.js` 和 `src/client/*.js` **按文件名编号顺序**拼成一个函数体，所以模块里：
+
+- 不能有 `import` / `export`
+- 不能有重复的顶层名
+- 客户端模块顶层**不能碰 `ctx`**（它只在 `apply(ctx)` 里存在）—— 这条踩过一次，
+  表现是整个 web 启动失败并弹「应用无法启动或已意外停止」
+
+宿主端能直接用的注入名只有一组 fs / spawn 函数（见 `00-context.js` 顶部注释），
+**没有 `node:path`、`node:os`**，路径工具是手写的。
 
 ## 排错
 
 | 现象 | 原因 |
 |---|---|
-| 侧边栏没有入口 | profile bundles 未登记 / 未 `pnpm install` / 刷新页面 |
-| 右侧栏找不到「剪辑进度」标签 | 宿主的右侧栏服务不可用，此时走抽屉降级（点左侧栏底部入口） |
-| 面板显示「当前没有进行中的剪辑任务」 | 进度文件不存在，或路径不对（看面板底部显示的路径） |
-| 百分比一直 `—` | `expectedBytes` 和 `expectedMs` 都没给，或输出文件还没生成 |
-| 速度一直 `—` | 只轮询过一次，等一轮 |
-| 任务已完成但显示「导出中」 | 输出文件仍在被写；30 秒无写入会自动转「已完成」 |
-| **分镜表是空的/只剩细横条** | `.fc-shot` 缺 `flex-shrink: 0`，被纵向 flex 容器压扁（0.2.0 已修） |
-| **预览区一直「渲染中…」** | 源文件不在系统缓存里时单帧要 1–2 秒；连续失败看是不是 `FILMCRAFT_CLI` 路径不对 |
-| **缩略图显示 `×`** | 该帧渲染失败，鼠标悬停片段行看 title；多半是源文件被移动或删除 |
-| **预览视频拖不动进度条** | `/media` 的 Range 支持被破坏（0.2.2 起支持 206） |
-| **预览画面占满整屏** | 预览框曾按面板宽度撑高（0.2.3 改为定高 + 4:3 反推宽度）；也可点「收起画面」 |
-| **面板底部的内容够不着** | 宿主的面板体不滚，面板自己按视口剩余高度滚动（0.2.4）。若仍不行，说明取不到 `window.innerHeight` |
-| **「剪辑」页报「unsupported call」或 404** | Host 侧改了路由，**必须重启 DSH**（宿主进程内加载，刷新页面不够） |
-| **编辑后画面还是旧的** | 缓存键含工程 mtime，若工程被外部程序改写而 mtime 未变，等 1 秒再刷新 |
+| 面板不出现 | `dsh.profile.bundles` 里写成了 `insert.id`，应写包名 |
+| 「应用无法启动或已意外停止」 | 客户端模块顶层碰了 `ctx`；`node test-client.mjs` 第一条断言会抓到 |
+| 改了宿主端没反应 | 宿主端需要**重启 DSH**，刷网页不够 |
+| 所有片段 fps 显示 `?` | 引擎返回的是 `settings.frame_rate:{num,den}`，不是 `settings.fps` |
+| 编辑报「命令不存在」 | 命令 id 没对着 `commands --json` 核 |
+| 合并出来画面被裁/补边 | 看「合并」页的兼容性预检，尺寸不一致会提前警告 |
+| 预览一直转圈 | 预览是串行渲染；等前一个渲完，或调低缩放 |
 
-> **改了 `src/dynamic/host.js` 之后要重启 DSH**：host 插件在宿主进程内被 import，
-> 没有热重载 API，`patchReload: live` 也不会重新 import 模块。改 client 侧刷新页面即可。
+## 测试
+
+```bash
+node test-client.mjs                  # 无浏览器渲染面板，驱动按钮，断言发给宿主的请求
+node test/smoke-host.mjs              # 只读：工作区、工程列表、工程详情、目录浏览
+node test/smoke-host.mjs --write      # 追加：合并 → 调色 → 导出 → 单帧 → 撤销（会真的渲染，慢）
+```
+
+`test-client.mjs` 的第一条断言是「模块能 import 且导出 apply」—— 0.2.5 的启动崩溃
+就是因为这条没人测。`smoke-host.mjs` 走的是真实 HTTP 路由，不是直接调内部函数。
 
 ## License
 
-[MIT](./LICENSE)
+MIT
