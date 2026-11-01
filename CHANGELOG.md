@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0 — MCP 剪辑服务器 + 宿主修复
+
+**新增 `dist/mcp/filmcraft-mcp.mjs`：标准 MCP（stdio）服务器，任何 MCP 客户端（Claude Desktop、Cursor、Codex 等）都能用 FilmCraft 剪辑。**
+零依赖，直接复用宿主模块（同一工作区、同一快照撤销栈、同一任务列表），所以面板和 AI 看到的是同一份状态。
+
+- 26 个工具：状态/工程/时间线/质检/素材/目录/命令说明；单帧（图片直接回给模型）、故事板、代理片段；
+  裁剪、移动、重排、波纹删除、启停、调色、预设、通用白名单命令、撤销；导入、序列、按序拼接；导出、任务、EDL/XML/FCPXML/OTIO/AAF。
+- 时间可写秒、帧（`30f`）、时间码（`00:00:12:12`），全部对齐到序列帧格再转成 tick。
+- 每个写工具：`dry_run`、一把跨进程锁、一次快照（= 一步撤销）、默认原子（失败自动回滚）、返回 before/after diff。
+- 安全：读写路径限定在工作区、已登记工程所在目录和 `FILMCRAFT_MCP_ROOTS`；`FILMCRAFT_MCP_READONLY=1` 只暴露读工具；白名单之外的引擎命令一律拒绝。
+- 新增 `filmcraft_check_timeline`：黑场/空隙、重叠、闪帧、停用、变速、联动音画不同步、离线素材、画幅不符。
+
+宿主修复（面板同样受益，详见 `docs/editing-gap-analysis.md` 第 4 节）：
+
+1. 自定义 `cliPath` 会被默认安装路径覆盖（`isDir` → `isFile`）。
+2. “导出永远串行”此前没有实现；现在有导出在跑时拒绝新导出。
+3. 宿主重启后任务永远 running；现在按 pid 存活结算。
+4. `edit.write` 新增 `atomic`，部分失败整体回滚。
+5. 面板 / 宿主 `filmcraft_edit` / MCP 共用跨进程工程锁。
+6. 时间线片段新增 `ticks` 字段（原始 tick），供精确计算。
+
+验证：`node test-client.mjs` 通过；`node test/mcp-smoke.mjs` 38 项通过（**模拟 CLI**）。
+`test/smoke-host.mjs` 与 `--real` 模式需在装有 FilmCraft 的 Windows 机器上运行，本版未在真实引擎上跑过。
+
 ## 0.3.1 — 2026-10-21
 
 **界面重做：从「能用的控制台」改成能看的工具面板。** 没有改任何接口，宿主端只动了

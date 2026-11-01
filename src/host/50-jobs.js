@@ -128,11 +128,19 @@ function jobRefresh(config, registry, id) {
     if (job.state !== 'running') continue
     const child = CHILDREN.get(job.id)
     if (child === undefined) {
-      // The record says running but this process is not the one that started it
-      // (a host restart). There is no handle to wait on, so report what the disk
-      // says and do not pretend to make progress.
-      job.progress = job.progress || {}
-      job.progress.orphan = true
+      // Started by another process: the DSH host before a restart, or the panel
+      // while this is the MCP server (or the other way round). 0.3 marked these
+      // `orphan` and left them "running" forever. Now: if the pid is still alive,
+      // sample progress in memory only (never write — the owner will write the
+      // final state and a late sample must not overwrite it); if it is gone,
+      // settle the record from the log and the output file.
+      if (job.pid && pidAlive(job.pid)) {
+        const view = jobSampleView(job)
+        job.progress = Object.assign({}, view, { orphan: true })
+        continue
+      }
+      jobSettleOrphan(config, job)
+      changed = true
       continue
     }
     if (child.exitCode === null && child.signalCode === null) {
@@ -173,6 +181,59 @@ function jobRefresh(config, registry, id) {
   return { jobs: target.map((job) => job), changed }
 }
 
+// Same arithmetic as jobSample, without touching disk.
+function jobSampleView(job) {
+  const copy = JSON.parse(JSON.stringify(job))
+  const now = Date.now()
+  const started = copy.startedAt ? Date.parse(copy.startedAt) : now
+  const elapsedMs = Math.max(0, now - started)
+  const stat = statOf(copy.out)
+  const bytes = stat ? stat.size : 0
+  const frames = num(copy.expected && copy.expected.frames, 0)
+  const perFrame = copy.expected && copy.expected.secPerFrame ? copy.expected.secPerFrame : 0
+  const ratio = perFrame > 0 && frames > 0 ? clamp(elapsedMs / (perFrame * frames * 1000), 0, 0.999) : null
+  return {
+    bytes: bytes,
+    elapsedMs: elapsedMs,
+    bytesPerSecond: elapsedMs > 1000 ? Math.round(bytes / (elapsedMs / 1000)) : 0,
+    framesExpected: frames,
+    ratio: ratio,
+    etaMs: ratio !== null && ratio > 0.02 ? Math.max(0, Math.round(elapsedMs / ratio - elapsedMs)) : null,
+  }
+}
+
+// The process is gone and nobody holds its exit code. The CLI's final JSON is the
+// best evidence; failing that, a non-empty output file. Anything else is failed —
+// claiming success for a file that may be truncated would be worse.
+function jobSettleOrphan(config, job) {
+  const log = readLogTail(job.log, 4000)
+  const parsed = parseJsonText(log)
+  const stat = statOf(job.out)
+  job.endedAt = nowIso()
+  job.pid = null
+  if (parsed && parsed.result) {
+    job.state = 'done'
+    job.error = null
+    job.result = {
+      frames: num(parsed.result.frames, 0),
+      seconds: num(parsed.result.seconds, 0),
+      renderFps: num(parsed.result.render_fps, 0),
+      bytes: num(parsed.result.bytes, 0),
+      path: parsed.result.path ? uniqSlashes(parsed.result.path) : job.out,
+    }
+  } else if (parsed && parsed.error) {
+    job.state = 'failed'
+    job.error = String(parsed.error)
+  } else {
+    job.state = 'failed'
+    job.error = stat && stat.size > 0
+      ? '导出进程已不在（宿主重启？），输出文件存在但无法确认完整：' + winPath(job.out)
+      : '导出进程已不在，且没有输出文件'
+  }
+  job.progress = Object.assign({}, job.progress || {}, { ratio: job.state === 'done' ? 1 : (job.progress ? job.progress.ratio : null), orphan: true })
+  jobWrite(config, job)
+}
+
 function readLogTail(path, limit) {
   if (!path) return ''
   try {
@@ -188,6 +249,15 @@ function tailText(text, limit) {
 }
 
 function jobStart(config, registry, request) {
+  // README promised "导出永远串行" but 0.3 never checked. Two renders through one
+  // engine install fight over CPU/GPU and, with the same out path, write the same
+  // file. Refuse rather than queue: a queue needs a timer, and the caller (panel
+  // or agent) can simply retry once `jobs` says the running one finished.
+  jobRefresh(config, registry)
+  const busy = jobList(config).filter((job) => job.state === 'running')
+  if (busy.length > 0 && request.allowParallel !== true) {
+    throw new Error('已有导出在进行（' + busy[0].id + ' → ' + (busy[0].display || busy[0].out) + '），导出是串行的，请等它结束或取消')
+  }
   const project = resolveProject(registry, request.project)
   const detail = projectDetail(config, project.file, { force: true })
   let sequence = detail.sequence

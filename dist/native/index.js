@@ -178,7 +178,10 @@ function createPlugin(harness) {
       cliPath: typeof stored.cliPath === 'string' && stored.cliPath !== '' ? uniqSlashes(stored.cliPath) : DEFAULT_CLI,
       scanDepth: num(stored.scanDepth, 4),
     }
-    if (!isDir(config.cliPath)) {
+    // Bug fix (0.4.0): this used to test `!isDir(cliPath)`, which is true for every
+    // real executable, so a user-chosen CLI was silently replaced by the default
+    // install whenever that existed. Only fall back when the chosen file is gone.
+    if (!isFile(config.cliPath)) {
       // A moved install should degrade to "some other copy of the CLI", not to
       // "every action fails with ENOENT".
       for (const candidate of [DEFAULT_CLI, 'C:/Program Files/FilmCraft/filmcraft-cli.exe']) {
@@ -249,6 +252,70 @@ function createPlugin(harness) {
     registry.updatedAt = nowIso()
     writeJsonAtomic(pathsOf(config.root).registry, registry)
     return registry
+  }
+
+
+  // ── process liveness ────────────────────────────────────────────────────────
+  // `kill(pid, 0)` sends nothing; it only asks whether the pid exists. EPERM means
+  // "exists, but not ours", which is still alive.
+  function pidAlive(pid) {
+    const n = Number(pid)
+    if (!Number.isInteger(n) || n <= 0) return false
+    try { process.kill(n, 0); return true } catch (error) { return !!(error && error.code === 'EPERM') }
+  }
+
+  // ── cross-process project lock ──────────────────────────────────────────────
+  // The panel (inside the DSH host) and the MCP server (its own process) can both
+  // edit the same .fcproj. Every edit is "snapshot, run CLI with --save, re-read";
+  // two of those interleaved lose one edit and corrupt the undo stack. A lock file
+  // created with O_EXCL serialises them. It lives under <workspace>/work/locks so
+  // nothing is ever written next to the user's project.
+  const LOCK_STALE_MS = 15 * 60 * 1000
+  function lockKey(text) {
+    let hash = 0x811c9dc5
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i)
+      hash = Math.imul(hash, 0x01000193) >>> 0
+    }
+    return hash.toString(16).padStart(8, '0')
+  }
+  function lockFileOf(config, projectFile) {
+    const dir = joinPath(pathsOf(config.root).work, 'locks')
+    ensureDir(dir)
+    return joinPath(dir, lockKey(uniqSlashes(projectFile).toLowerCase()) + '.lock')
+  }
+  function lockInfo(config, projectFile) {
+    const file = lockFileOf(config, projectFile)
+    const info = readJson(file, null)
+    if (!info) return null
+    const stale = !pidAlive(info.pid) || (Date.now() - Date.parse(info.at || 0)) > LOCK_STALE_MS
+    return Object.assign({ file: file, stale: stale }, info)
+  }
+  function withProjectLock(config, projectFile, owner, fn) {
+    const file = lockFileOf(config, projectFile)
+    const me = (typeof process !== 'undefined' && process.pid) || 0
+    let fd = -1
+    for (let attempt = 0; attempt < 2 && fd < 0; attempt += 1) {
+      try {
+        fd = openSync(file, 'wx')
+      } catch (error) {
+        const info = lockInfo(config, projectFile)
+        if (info && info.pid === me) return fn()          // re-entrant within one process
+        if (info && !info.stale) {
+          throw new Error('工程正被另一个编辑占用（' + (info.owner || '未知') + '，pid ' + info.pid + '，开始于 ' + info.at + '），稍后重试')
+        }
+        try { unlinkSync(file) } catch (_) { }             // stale: take it over
+      }
+    }
+    if (fd < 0) throw new Error('无法锁定工程: ' + winPath(projectFile))
+    try {
+      writeFileSync(fd, JSON.stringify({ pid: me, owner: owner || 'unknown', at: nowIso(), project: uniqSlashes(projectFile) }))
+    } finally { try { closeSync(fd) } catch (_) { } }
+    try {
+      return fn()
+    } finally {
+      try { unlinkSync(file) } catch (_) { }
+    }
   }
 
   // ── 10-engine.js ─────────────────────────────────────────────────────
@@ -611,6 +678,9 @@ function createPlugin(harness) {
             gainDb: num(raw.gainDb, 0),
             link: raw.link === undefined ? null : raw.link,
             effects: normalizeEffects(raw.effects),
+            // Raw engine ticks, untouched. Seconds are for display; anything that
+            // computes a new edit point should start from these (0.4.0).
+            ticks: { start: num(raw.start, 0), duration: num(raw.duration, 0), sourceIn: num(raw.sourceIn, 0), sourceOut: num(raw.sourceOut, 0) },
           }
           items.push(clip)
           clips.push(clip)
@@ -1105,11 +1175,21 @@ function createPlugin(harness) {
     }
     const snapshot = snapshotTake(config, project.file)
     const run = runSteps(config, project.file, commands)
+    // atomic (0.4.0): `run --keep-going` happily leaves a half-applied batch —
+    // e.g. the first of two swap moves landed, the second did not. With atomic the
+    // project goes back to the snapshot taken above, so a batch is all or nothing.
+    let rolledBack = false
+    if (request.atomic === true && run.failed.length > 0 && snapshot) {
+      const undone = snapshotUndo(config, project.file)
+      rolledBack = undone.ok === true
+      projectInvalidate(project.file)
+    }
     return {
       ok: run.failed.length === 0,
       ran: run.ran,
       failed: run.failed,
-      snapshot: snapshot ? baseOf(snapshot) : null,
+      rolledBack: rolledBack,
+      snapshot: snapshot && !rolledBack ? baseOf(snapshot) : null,
       detail: projectDetail(config, project.file, { force: true }),
     }
   }
@@ -1528,11 +1608,19 @@ function createPlugin(harness) {
       if (job.state !== 'running') continue
       const child = CHILDREN.get(job.id)
       if (child === undefined) {
-        // The record says running but this process is not the one that started it
-        // (a host restart). There is no handle to wait on, so report what the disk
-        // says and do not pretend to make progress.
-        job.progress = job.progress || {}
-        job.progress.orphan = true
+        // Started by another process: the DSH host before a restart, or the panel
+        // while this is the MCP server (or the other way round). 0.3 marked these
+        // `orphan` and left them "running" forever. Now: if the pid is still alive,
+        // sample progress in memory only (never write — the owner will write the
+        // final state and a late sample must not overwrite it); if it is gone,
+        // settle the record from the log and the output file.
+        if (job.pid && pidAlive(job.pid)) {
+          const view = jobSampleView(job)
+          job.progress = Object.assign({}, view, { orphan: true })
+          continue
+        }
+        jobSettleOrphan(config, job)
+        changed = true
         continue
       }
       if (child.exitCode === null && child.signalCode === null) {
@@ -1573,6 +1661,59 @@ function createPlugin(harness) {
     return { jobs: target.map((job) => job), changed }
   }
 
+  // Same arithmetic as jobSample, without touching disk.
+  function jobSampleView(job) {
+    const copy = JSON.parse(JSON.stringify(job))
+    const now = Date.now()
+    const started = copy.startedAt ? Date.parse(copy.startedAt) : now
+    const elapsedMs = Math.max(0, now - started)
+    const stat = statOf(copy.out)
+    const bytes = stat ? stat.size : 0
+    const frames = num(copy.expected && copy.expected.frames, 0)
+    const perFrame = copy.expected && copy.expected.secPerFrame ? copy.expected.secPerFrame : 0
+    const ratio = perFrame > 0 && frames > 0 ? clamp(elapsedMs / (perFrame * frames * 1000), 0, 0.999) : null
+    return {
+      bytes: bytes,
+      elapsedMs: elapsedMs,
+      bytesPerSecond: elapsedMs > 1000 ? Math.round(bytes / (elapsedMs / 1000)) : 0,
+      framesExpected: frames,
+      ratio: ratio,
+      etaMs: ratio !== null && ratio > 0.02 ? Math.max(0, Math.round(elapsedMs / ratio - elapsedMs)) : null,
+    }
+  }
+
+  // The process is gone and nobody holds its exit code. The CLI's final JSON is the
+  // best evidence; failing that, a non-empty output file. Anything else is failed —
+  // claiming success for a file that may be truncated would be worse.
+  function jobSettleOrphan(config, job) {
+    const log = readLogTail(job.log, 4000)
+    const parsed = parseJsonText(log)
+    const stat = statOf(job.out)
+    job.endedAt = nowIso()
+    job.pid = null
+    if (parsed && parsed.result) {
+      job.state = 'done'
+      job.error = null
+      job.result = {
+        frames: num(parsed.result.frames, 0),
+        seconds: num(parsed.result.seconds, 0),
+        renderFps: num(parsed.result.render_fps, 0),
+        bytes: num(parsed.result.bytes, 0),
+        path: parsed.result.path ? uniqSlashes(parsed.result.path) : job.out,
+      }
+    } else if (parsed && parsed.error) {
+      job.state = 'failed'
+      job.error = String(parsed.error)
+    } else {
+      job.state = 'failed'
+      job.error = stat && stat.size > 0
+        ? '导出进程已不在（宿主重启？），输出文件存在但无法确认完整：' + winPath(job.out)
+        : '导出进程已不在，且没有输出文件'
+    }
+    job.progress = Object.assign({}, job.progress || {}, { ratio: job.state === 'done' ? 1 : (job.progress ? job.progress.ratio : null), orphan: true })
+    jobWrite(config, job)
+  }
+
   function readLogTail(path, limit) {
     if (!path) return ''
     try {
@@ -1588,6 +1729,15 @@ function createPlugin(harness) {
   }
 
   function jobStart(config, registry, request) {
+    // README promised "导出永远串行" but 0.3 never checked. Two renders through one
+    // engine install fight over CPU/GPU and, with the same out path, write the same
+    // file. Refuse rather than queue: a queue needs a timer, and the caller (panel
+    // or agent) can simply retry once `jobs` says the running one finished.
+    jobRefresh(config, registry)
+    const busy = jobList(config).filter((job) => job.state === 'running')
+    if (busy.length > 0 && request.allowParallel !== true) {
+      throw new Error('已有导出在进行（' + busy[0].id + ' → ' + (busy[0].display || busy[0].out) + '），导出是串行的，请等它结束或取消')
+    }
     const project = resolveProject(registry, request.project)
     const detail = projectDetail(config, project.file, { force: true })
     let sequence = detail.sequence
@@ -1910,7 +2060,7 @@ function createPlugin(harness) {
   // loads config and registry fresh, because both can change at runtime (the user
   // moves the workspace, adds a preset) and a cached copy would silently diverge.
 
-  const PLUGIN_VERSION = '0.3.1'
+  const PLUGIN_VERSION = '0.4.0'
 
   // The report file the *old* pipeline wrote. Kept readable so existing scripts
   // keep working; nothing new is written in this format.
@@ -1952,6 +2102,21 @@ function createPlugin(harness) {
       const config = loadConfig()
       const registry = loadRegistry(config)
       return Promise.resolve(fn(config, registry, body || {}))
+    }
+  }
+
+  // Same as withState, but holds the cross-process lock of the project the body
+  // names for the whole handler (0.4.0). A merge into a brand-new project has no
+  // file to lock yet and runs unlocked.
+  function withProjectWrite(fn) {
+    return (body) => {
+      const config = loadConfig()
+      const registry = loadRegistry(config)
+      const input = body || {}
+      let file = ''
+      try { if (input.project || input.target) file = resolveProject(registry, input.project || input.target).file } catch (_) { file = '' }
+      if (file === '') return Promise.resolve(fn(config, registry, input))
+      return Promise.resolve(withProjectLock(config, file, 'panel', () => fn(config, registry, input)))
     }
   }
 
@@ -2156,7 +2321,7 @@ function createPlugin(harness) {
       }))
     })
 
-    H['project.write'] = withState((config, registry, body) => {
+    H['project.write'] = withProjectWrite((config, registry, body) => {
       const action = body.action
       if (action === 'activate') {
         const project = resolveProject(registry, body.project)
@@ -2273,7 +2438,7 @@ function createPlugin(harness) {
     })
 
     // editing
-    H['import.write'] = withState((config, registry, body) => {
+    H['import.write'] = withProjectWrite((config, registry, body) => {
       if (body.place === true || body.place === '1') {
         const result = projectPasteMedia(config, registry, body)
         return Object.assign({ ok: true }, result)
@@ -2282,7 +2447,7 @@ function createPlugin(harness) {
       return Object.assign({ ok: true }, result)
     })
 
-    H['sequence.write'] = withState((config, registry, body) => {
+    H['sequence.write'] = withProjectWrite((config, registry, body) => {
       const action = body.action
       if (action === 'create') return Object.assign({ ok: true }, projectCreateSequence(config, registry, body))
       if (action === 'activate') {
@@ -2294,7 +2459,7 @@ function createPlugin(harness) {
       throw new Error('未知的 sequence action: ' + String(action))
     })
 
-    H['merge.write'] = withState((config, registry, body) => {
+    H['merge.write'] = withProjectWrite((config, registry, body) => {
       const result = projectMerge(config, registry, body)
       saveRegistry(config, registry)
       if (body.export === true || body.export === '1' || (body.export && typeof body.export === 'object')) {
@@ -2310,14 +2475,14 @@ function createPlugin(harness) {
       return Object.assign({ ok: true }, result, { job: null })
     })
 
-    H['edit.write'] = withState((config, registry, body) => projectApply(config, registry, body))
-    H['grade.write'] = withState((config, registry, body) => {
+    H['edit.write'] = withProjectWrite((config, registry, body) => projectApply(config, registry, body))
+    H['grade.write'] = withProjectWrite((config, registry, body) => {
       const result = body.clear === true || body.clear === '1'
         ? gradeClearClips(config, registry, body)
         : gradeClips(config, registry, body)
       return Object.assign({ ok: true }, result)
     })
-    H['undo.write'] = withState((config, registry, body) => projectUndo(config, registry, body))
+    H['undo.write'] = withProjectWrite((config, registry, body) => projectUndo(config, registry, body))
 
     // jobs
     H['export.write'] = withState((config, registry, body) => {
@@ -2435,6 +2600,19 @@ function createPlugin(harness) {
         const config = loadConfig()
         const registry = loadRegistry(config)
         const action = args && args.action
+        const writes = { import: 1, sequence: 1, merge: 1, apply: 1, grade: 1, undo: 1 }
+        if (writes[action] === 1 && args.project && !(action === 'apply' && args.dryRun === true)) {
+          const file = resolveProject(registry, args.project).file
+          return withProjectLock(config, file, 'dsh-agent', () => editToolDispatch(config, registry, action, args))
+        }
+        return editToolDispatch(config, registry, action, args)
+      },
+    }))
+  }
+
+  function editToolDispatch(config, registry, action, args) {
+    {
+      {
         if (action === 'workspace') return workspacePayload(config, registry)
         if (action === 'projects') return { ok: true, projects: projectSummaries(config, registry) }
         if (action === 'open') {
@@ -2481,8 +2659,8 @@ function createPlugin(harness) {
         if (action === 'frame') return previewFrame(config, Object.assign({}, args, { project: resolveProject(registry, args.project).file }))
         if (action === 'proxy') return previewProxy(config, Object.assign({}, args, { project: resolveProject(registry, args.project).file }))
         throw new Error('action 必须是 workspace|projects|open|assets|browse|import|sequence|merge|apply|grade|undo|export|jobs|cancel|frame|proxy')
-      },
-    }))
+      }
+    }
   }
 
   // ── 99-plugin.js ─────────────────────────────────────────────────────

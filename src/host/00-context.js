@@ -159,7 +159,10 @@ function loadConfig() {
     cliPath: typeof stored.cliPath === 'string' && stored.cliPath !== '' ? uniqSlashes(stored.cliPath) : DEFAULT_CLI,
     scanDepth: num(stored.scanDepth, 4),
   }
-  if (!isDir(config.cliPath)) {
+  // Bug fix (0.4.0): this used to test `!isDir(cliPath)`, which is true for every
+  // real executable, so a user-chosen CLI was silently replaced by the default
+  // install whenever that existed. Only fall back when the chosen file is gone.
+  if (!isFile(config.cliPath)) {
     // A moved install should degrade to "some other copy of the CLI", not to
     // "every action fails with ENOENT".
     for (const candidate of [DEFAULT_CLI, 'C:/Program Files/FilmCraft/filmcraft-cli.exe']) {
@@ -230,4 +233,68 @@ function saveRegistry(config, registry) {
   registry.updatedAt = nowIso()
   writeJsonAtomic(pathsOf(config.root).registry, registry)
   return registry
+}
+
+
+// ── process liveness ────────────────────────────────────────────────────────
+// `kill(pid, 0)` sends nothing; it only asks whether the pid exists. EPERM means
+// "exists, but not ours", which is still alive.
+function pidAlive(pid) {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 0) return false
+  try { process.kill(n, 0); return true } catch (error) { return !!(error && error.code === 'EPERM') }
+}
+
+// ── cross-process project lock ──────────────────────────────────────────────
+// The panel (inside the DSH host) and the MCP server (its own process) can both
+// edit the same .fcproj. Every edit is "snapshot, run CLI with --save, re-read";
+// two of those interleaved lose one edit and corrupt the undo stack. A lock file
+// created with O_EXCL serialises them. It lives under <workspace>/work/locks so
+// nothing is ever written next to the user's project.
+const LOCK_STALE_MS = 15 * 60 * 1000
+function lockKey(text) {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+function lockFileOf(config, projectFile) {
+  const dir = joinPath(pathsOf(config.root).work, 'locks')
+  ensureDir(dir)
+  return joinPath(dir, lockKey(uniqSlashes(projectFile).toLowerCase()) + '.lock')
+}
+function lockInfo(config, projectFile) {
+  const file = lockFileOf(config, projectFile)
+  const info = readJson(file, null)
+  if (!info) return null
+  const stale = !pidAlive(info.pid) || (Date.now() - Date.parse(info.at || 0)) > LOCK_STALE_MS
+  return Object.assign({ file: file, stale: stale }, info)
+}
+function withProjectLock(config, projectFile, owner, fn) {
+  const file = lockFileOf(config, projectFile)
+  const me = (typeof process !== 'undefined' && process.pid) || 0
+  let fd = -1
+  for (let attempt = 0; attempt < 2 && fd < 0; attempt += 1) {
+    try {
+      fd = openSync(file, 'wx')
+    } catch (error) {
+      const info = lockInfo(config, projectFile)
+      if (info && info.pid === me) return fn()          // re-entrant within one process
+      if (info && !info.stale) {
+        throw new Error('工程正被另一个编辑占用（' + (info.owner || '未知') + '，pid ' + info.pid + '，开始于 ' + info.at + '），稍后重试')
+      }
+      try { unlinkSync(file) } catch (_) { }             // stale: take it over
+    }
+  }
+  if (fd < 0) throw new Error('无法锁定工程: ' + winPath(projectFile))
+  try {
+    writeFileSync(fd, JSON.stringify({ pid: me, owner: owner || 'unknown', at: nowIso(), project: uniqSlashes(projectFile) }))
+  } finally { try { closeSync(fd) } catch (_) { } }
+  try {
+    return fn()
+  } finally {
+    try { unlinkSync(file) } catch (_) { }
+  }
 }

@@ -151,11 +151,21 @@ function projectApply(config, registry, request) {
   }
   const snapshot = snapshotTake(config, project.file)
   const run = runSteps(config, project.file, commands)
+  // atomic (0.4.0): `run --keep-going` happily leaves a half-applied batch —
+  // e.g. the first of two swap moves landed, the second did not. With atomic the
+  // project goes back to the snapshot taken above, so a batch is all or nothing.
+  let rolledBack = false
+  if (request.atomic === true && run.failed.length > 0 && snapshot) {
+    const undone = snapshotUndo(config, project.file)
+    rolledBack = undone.ok === true
+    projectInvalidate(project.file)
+  }
   return {
     ok: run.failed.length === 0,
     ran: run.ran,
     failed: run.failed,
-    snapshot: snapshot ? baseOf(snapshot) : null,
+    rolledBack: rolledBack,
+    snapshot: snapshot && !rolledBack ? baseOf(snapshot) : null,
     detail: projectDetail(config, project.file, { force: true }),
   }
 }

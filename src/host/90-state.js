@@ -3,7 +3,7 @@
 // loads config and registry fresh, because both can change at runtime (the user
 // moves the workspace, adds a preset) and a cached copy would silently diverge.
 
-const PLUGIN_VERSION = '0.3.1'
+const PLUGIN_VERSION = '0.4.0'
 
 // The report file the *old* pipeline wrote. Kept readable so existing scripts
 // keep working; nothing new is written in this format.
@@ -45,6 +45,21 @@ function withState(fn) {
     const config = loadConfig()
     const registry = loadRegistry(config)
     return Promise.resolve(fn(config, registry, body || {}))
+  }
+}
+
+// Same as withState, but holds the cross-process lock of the project the body
+// names for the whole handler (0.4.0). A merge into a brand-new project has no
+// file to lock yet and runs unlocked.
+function withProjectWrite(fn) {
+  return (body) => {
+    const config = loadConfig()
+    const registry = loadRegistry(config)
+    const input = body || {}
+    let file = ''
+    try { if (input.project || input.target) file = resolveProject(registry, input.project || input.target).file } catch (_) { file = '' }
+    if (file === '') return Promise.resolve(fn(config, registry, input))
+    return Promise.resolve(withProjectLock(config, file, 'panel', () => fn(config, registry, input)))
   }
 }
 
@@ -249,7 +264,7 @@ function buildHandlers(harness) {
     }))
   })
 
-  H['project.write'] = withState((config, registry, body) => {
+  H['project.write'] = withProjectWrite((config, registry, body) => {
     const action = body.action
     if (action === 'activate') {
       const project = resolveProject(registry, body.project)
@@ -366,7 +381,7 @@ function buildHandlers(harness) {
   })
 
   // editing
-  H['import.write'] = withState((config, registry, body) => {
+  H['import.write'] = withProjectWrite((config, registry, body) => {
     if (body.place === true || body.place === '1') {
       const result = projectPasteMedia(config, registry, body)
       return Object.assign({ ok: true }, result)
@@ -375,7 +390,7 @@ function buildHandlers(harness) {
     return Object.assign({ ok: true }, result)
   })
 
-  H['sequence.write'] = withState((config, registry, body) => {
+  H['sequence.write'] = withProjectWrite((config, registry, body) => {
     const action = body.action
     if (action === 'create') return Object.assign({ ok: true }, projectCreateSequence(config, registry, body))
     if (action === 'activate') {
@@ -387,7 +402,7 @@ function buildHandlers(harness) {
     throw new Error('未知的 sequence action: ' + String(action))
   })
 
-  H['merge.write'] = withState((config, registry, body) => {
+  H['merge.write'] = withProjectWrite((config, registry, body) => {
     const result = projectMerge(config, registry, body)
     saveRegistry(config, registry)
     if (body.export === true || body.export === '1' || (body.export && typeof body.export === 'object')) {
@@ -403,14 +418,14 @@ function buildHandlers(harness) {
     return Object.assign({ ok: true }, result, { job: null })
   })
 
-  H['edit.write'] = withState((config, registry, body) => projectApply(config, registry, body))
-  H['grade.write'] = withState((config, registry, body) => {
+  H['edit.write'] = withProjectWrite((config, registry, body) => projectApply(config, registry, body))
+  H['grade.write'] = withProjectWrite((config, registry, body) => {
     const result = body.clear === true || body.clear === '1'
       ? gradeClearClips(config, registry, body)
       : gradeClips(config, registry, body)
     return Object.assign({ ok: true }, result)
   })
-  H['undo.write'] = withState((config, registry, body) => projectUndo(config, registry, body))
+  H['undo.write'] = withProjectWrite((config, registry, body) => projectUndo(config, registry, body))
 
   // jobs
   H['export.write'] = withState((config, registry, body) => {
@@ -528,6 +543,19 @@ function registerTools(harness, ctx) {
       const config = loadConfig()
       const registry = loadRegistry(config)
       const action = args && args.action
+      const writes = { import: 1, sequence: 1, merge: 1, apply: 1, grade: 1, undo: 1 }
+      if (writes[action] === 1 && args.project && !(action === 'apply' && args.dryRun === true)) {
+        const file = resolveProject(registry, args.project).file
+        return withProjectLock(config, file, 'dsh-agent', () => editToolDispatch(config, registry, action, args))
+      }
+      return editToolDispatch(config, registry, action, args)
+    },
+  }))
+}
+
+function editToolDispatch(config, registry, action, args) {
+  {
+    {
       if (action === 'workspace') return workspacePayload(config, registry)
       if (action === 'projects') return { ok: true, projects: projectSummaries(config, registry) }
       if (action === 'open') {
@@ -574,6 +602,6 @@ function registerTools(harness, ctx) {
       if (action === 'frame') return previewFrame(config, Object.assign({}, args, { project: resolveProject(registry, args.project).file }))
       if (action === 'proxy') return previewProxy(config, Object.assign({}, args, { project: resolveProject(registry, args.project).file }))
       throw new Error('action 必须是 workspace|projects|open|assets|browse|import|sequence|merge|apply|grade|undo|export|jobs|cancel|frame|proxy')
-    },
-  }))
+    }
+  }
 }

@@ -33,6 +33,42 @@ DSH 面板插件：**通用 FilmCraft 剪辑台**。不是一个项目专用的�
 └────────────────────────────────────────────────────┘
 ```
 
+
+## MCP 服务器（0.4.0）
+
+`dist/mcp/filmcraft-mcp.mjs` 是一个零依赖的 MCP stdio 服务器，和面板共用工作区、撤销快照和任务列表。不需要 DSH 在运行，只需要 Node ≥ 22 和 FilmCraft。
+
+```json
+{
+  "mcpServers": {
+    "filmcraft": {
+      "command": "node",
+      "args": ["D:/path/to/dsh-filmcraft-progress/dist/mcp/filmcraft-mcp.mjs"],
+      "env": {
+        "FILMCRAFT_MCP_ROOTS": "D:/素材;E:/拍摄"
+      }
+    }
+  }
+}
+```
+
+| 环境变量 | 作用 |
+|---|---|
+| `FILMCRAFT_CLI` | 指定 filmcraft-cli 路径（默认读面板设置 `~/.dsh/filmcraft-progress/config.json`） |
+| `FILMCRAFT_WORKSPACE` | 指定工作区根目录（默认同面板） |
+| `FILMCRAFT_MCP_ROOTS` | 额外允许读写的目录，`;` 分隔。默认只允许工作区和已登记工程所在目录 |
+| `FILMCRAFT_MCP_READONLY` | `1` = 只暴露读取 / 预览类工具 |
+
+典型流程：`filmcraft_status` → `filmcraft_list_projects` → `filmcraft_get_timeline` → `filmcraft_assemble`（粗剪）→ `filmcraft_trim` / `move_clips` / `reorder` / `delete_clips`（先 `dry_run`）→ `filmcraft_check_timeline` → `filmcraft_storyboard` / `preview_frame` → `filmcraft_grade` → `filmcraft_export` → `filmcraft_jobs`。
+
+- 时间参数接受 `12.5`、`"30f"`、`"00:00:12:12"`、`"1:02.5"`，自动对齐到帧。
+- 每次写操作是一步撤销（`filmcraft_undo`），失败自动回滚，返回 before/after diff。
+- 分割、slip/slide/roll、变速、标记：先 `filmcraft_describe_commands` 从本机 CLI 读参数，再 `filmcraft_apply`。
+- 面板和 MCP 同时编辑同一工程时由跨进程锁串行化，后到的一方会收到“工程正被占用”。
+
+测试：`npm run test:mcp`（模拟 CLI，任何系统）；真实引擎：`set FILMCRAFT_CLI=...` 后 `node test/mcp-smoke.mjs --real a.mp4 b.mp4 c.mp4`。
+剪辑能力对照与界面建议见 [`docs/editing-gap-analysis.md`](docs/editing-gap-analysis.md)。
+
 ## 为什么是「重构」而不是加功能
 
 0.2.x 是给**某一个项目**写的：工程路径、导出目录、四套调色配方、预览的 4:3 比例、

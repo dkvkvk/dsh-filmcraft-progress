@@ -84,6 +84,9 @@ function normalizeSequence(sequence) {
           gainDb: num(raw.gainDb, 0),
           link: raw.link === undefined ? null : raw.link,
           effects: normalizeEffects(raw.effects),
+          // Raw engine ticks, untouched. Seconds are for display; anything that
+          // computes a new edit point should start from these (0.4.0).
+          ticks: { start: num(raw.start, 0), duration: num(raw.duration, 0), sourceIn: num(raw.sourceIn, 0), sourceOut: num(raw.sourceOut, 0) },
         }
         items.push(clip)
         clips.push(clip)
