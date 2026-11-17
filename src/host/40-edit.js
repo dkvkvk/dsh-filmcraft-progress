@@ -17,9 +17,14 @@ function runSteps(config, projectFile, steps, options) {
     const chunk = steps.slice(index, index + STEP_CHUNK)
     const run = engineRun(config, projectFile, chunk, { timeoutMs: opts.timeoutMs })
     out.ran += chunk.length
+    if (!run.ok && !run.results.some((entry) => entry.ok === false)) out.failed.push({ id: chunk[0].id, error: '引擎未正常完成批处理（退出码 ' + run.status + '）' })
     for (let i = 0; i < run.results.length; i += 1) {
       const result = run.results[i] || {}
       out.results.push(result)
+      const step = chunk[i]
+      if (result.ok === true && step && step.id === 'timeline.trim' && typeof step.params.delta === 'number' && result.result && typeof result.result.delta === 'number' && Math.abs(result.result.delta - step.params.delta) > 1) {
+        out.failed.push({ id: step.id, error: '源素材余量不足，无法按指定帧数裁切或延长' })
+      }
       if (result.ok === false) {
         out.failed.push({
           id: result.id || (chunk[i] ? chunk[i].id : '?'),
@@ -109,7 +114,9 @@ function gradeClearClips(config, registry, request) {
     if (clips.indexOf(clip.clip) < 0) continue
     for (let index = clip.effects.length - 1; index >= 0; index -= 1) {
       if (String(clip.effects[index].effect).toLowerCase() !== GRADE_EFFECT) continue
-      steps.push({ id: 'effects.reset', params: { clip: clip.clip, index: index } })
+      // reset restores parameters but leaves the effect attached. Remove only
+      // lumetri, in reverse index order, preserving intrinsic/other effects.
+      steps.push({ id: 'effects.remove', params: { clip: clip.clip, index: index } })
     }
   }
   if (steps.length === 0) return { cleared: 0, detail: detail }
@@ -122,7 +129,7 @@ function gradeClearClips(config, registry, request) {
 // agent would, and gets the per-command outcome back rather than a bare ok.
 function projectApply(config, registry, request) {
   const project = resolveProject(registry, request.project)
-  const commands = guardCommands(request.commands)
+  const commands = guardCommands(request.operation ? editWorkflowCommands(config, project.file, request) : request.commands)
   // dry-run answers "what would this do" without touching the file. The engine
   // has no plan mode of its own (every command just runs), so what can be
   // promised honestly is the exact command list plus which of the referenced
@@ -150,12 +157,13 @@ function projectApply(config, registry, request) {
     }
   }
   const snapshot = snapshotTake(config, project.file)
+  if (request.operation && !snapshot) throw new Error('无法建立撤销快照，尚未修改工程')
   const run = runSteps(config, project.file, commands)
   // atomic (0.4.0): `run --keep-going` happily leaves a half-applied batch —
   // e.g. the first of two swap moves landed, the second did not. With atomic the
   // project goes back to the snapshot taken above, so a batch is all or nothing.
   let rolledBack = false
-  if (request.atomic === true && run.failed.length > 0 && snapshot) {
+  if ((request.atomic === true || request.operation) && run.failed.length > 0 && snapshot) {
     const undone = snapshotUndo(config, project.file)
     rolledBack = undone.ok === true
     projectInvalidate(project.file)

@@ -358,6 +358,15 @@ window.__ModuleLoader__.load({
       for (const clip of clips) if (clip.clip === store.clipId) return clip
       return null
     }
+    function fcSelectClip(id) {
+      const clip = fcClips().find(function (candidate) { return candidate.clip === id })
+      if (!clip || store.clipId === id || store.busy !== '') return
+      fcDropUrls()
+      store.clipId = id
+      store.scrub = 0
+      fcEmit()
+      if (store.prevOpen) fcFrame(clip.start)
+    }
     function fcPreset(id) {
       const presets = store.workspace && Array.isArray(store.workspace.presets) ? store.workspace.presets : []
       for (const preset of presets) if (preset.id === id) return preset
@@ -425,6 +434,12 @@ window.__ModuleLoader__.load({
 
     function fcSetDetail(detail, options) {
       const keep = !!(options && options.keep)
+      const switched = !store.detail || !detail || store.detail.path !== detail.path || store.detail.activeSequence !== detail.activeSequence
+      if (switched) {
+        store.captionDraft = { id: null, track: null, text: '', start: '0', end: '3' }
+        store.dragClip = null
+        store.dragSequence = null
+      }
       fcDropUrls()
       store.detail = detail || null
       store.projectId = detail && detail.projectId ? detail.projectId : ''
@@ -436,6 +451,8 @@ window.__ModuleLoader__.load({
       let found = false
       for (const clip of clips) if (clip.clip === store.clipId) found = true
       if (!found) store.clipId = clips.length > 0 ? clips[0].clip : null
+      const selected = fcSelectedClip()
+      if (selected) store.scrub = Math.min(store.scrub, Math.max(0, selected.dur - 1 / fcFps()))
       fcEmit()
       // Every detail read is a chance that the picture changed (an edit, a sequence
       // switch, a different project). Refreshing it here keeps the preview honest
@@ -505,7 +522,7 @@ window.__ModuleLoader__.load({
     // ── editing ─────────────────────────────────────────────────────────────────
     async function fcEdit(commands, label) {
       const result = await fcRun(label, function () {
-        return host.call('edit.write', { project: fcProjectRef(), commands: commands })
+        return host.call('edit.write', { project: fcProjectRef(), commands: commands, atomic: true })
       })
       if (!result) return null
       if (result.detail) fcSetDetail(result.detail, { keep: true })
@@ -520,11 +537,7 @@ window.__ModuleLoader__.load({
     }
 
     function fcTrim(edge, deltaSec) {
-      const clip = fcSelectedClip()
-      if (!clip) return
-      const delta = Math.round(deltaSec * TICKS)
-      fcEdit([{ id: 'timeline.trim', params: { clip: clip.clip, edge: edge, mode: 'ripple', delta: delta } }],
-        (edge === 'in' ? '裁头 ' : '裁尾 ') + (deltaSec > 0 ? '+' : '') + deltaSec + 's ')
+      return fcTrimExact(edge, deltaSec)
     }
 
     function fcDeleteClip() {
@@ -536,16 +549,11 @@ window.__ModuleLoader__.load({
     function fcMoveClip(dir) {
       const clip = fcSelectedClip()
       if (!clip) return
-      const clips = fcClips()
+      const clips = fcClips().filter(function (entry) { return entry.track === clip.track })
       const index = clips.indexOf(clip)
       const next = clips[dir < 0 ? index - 1 : index + 1]
       if (!next) return
-      // Swap by moving each clip to the other's start time. Two commands, one
-      // snapshot: the host treats the batch as a single undo step.
-      fcEdit([
-        { id: 'timeline.move', params: { moves: [{ clip: clip.clip, track: clip.track, time: Math.round(next.start * TICKS) }] } },
-        { id: 'timeline.move', params: { moves: [{ clip: next.clip, track: next.track, time: Math.round(clip.start * TICKS) }] } },
-      ], dir < 0 ? '上移 ' : '下移 ')
+      return fcReorder(clip.clip, next.clip, dir > 0)
     }
 
     function fcToggleClip() {
@@ -622,7 +630,9 @@ window.__ModuleLoader__.load({
     // Scrubbing should not spawn one render process per pixel. 400 ms after the last
     // move is slow enough to coalesce a drag and fast enough to feel immediate.
     function fcScrub(seconds) {
-      store.scrub = Math.max(0, Number(seconds) || 0)
+      const selected = fcSelectedClip()
+      const fps = fcFps()
+      store.scrub = Math.max(0, Math.min(Math.round((Number(seconds) || 0) * fps) / fps, selected ? Math.max(0, selected.dur - 1 / fps) : 0))
       fcEmit()
       if (!store.prevOpen) return
       if (store.scrubTimer !== null) clearTimeout(store.scrubTimer)
@@ -1120,6 +1130,127 @@ window.__ModuleLoader__.load({
       return result
     }
 
+    // ── 18-editing.js ────────────────────────────────────────────────
+    // Editing drafts are kept outside React so typing survives store repainting.
+    Object.assign(store, {
+      trimInput: '1f', trimEdge: 'in',
+      captionDraft: { id: null, track: null, text: '', start: '0', end: '3' },
+      transitionEffect: 'cross_dissolve', transitionEdge: 'out', transitionDuration: '12f',
+      dragClip: null, dragSequence: null,
+    })
+
+    function fcFps() { return (fcSequence() && fcSequence().fps) || 25 }
+    function fcTc(seconds) {
+      const fps = fcFps()
+      const nominal = Math.round(fps)
+      let frames = Math.max(0, Math.round(seconds * fps))
+      const ff = frames % nominal
+      const ss = Math.floor(frames / nominal) % 60
+      const mm = Math.floor(frames / nominal / 60) % 60
+      return fcPad(Math.floor(frames / nominal / 3600)) + ':' + fcPad(mm) + ':' + fcPad(ss) + ':' + fcPad(ff)
+    }
+
+    async function fcWorkflow(options, label) {
+      if (store.busy || !fcSequence()) return null
+      const result = await fcRun(label, function () {
+        return host.call('edit.write', Object.assign({ project: fcProjectRef(), sequence: fcSequence().id, atomic: true }, options))
+      })
+      if (!result) return null
+      if (result.detail) fcSetDetail(result.detail, { keep: true })
+      if (result.ok === false || (result.failed && result.failed.length)) {
+        fcFail(label + '失败' + (result.rolledBack ? '，已恢复修改前的工程' : '') + '：' + ((result.failed && result.failed[0] && result.failed[0].error) || '请重试'))
+        return null
+      }
+      fcNotice(label + '完成')
+      return result
+    }
+
+    function fcTrimExact(edge, delta) {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      return fcWorkflow({ operation: 'trim', clip: clip.clip, edge: edge, delta: delta }, '精确裁切')
+    }
+    function fcSplit() {
+      const clip = fcSelectedClip()
+      if (clip) return fcWorkflow({ operation: 'split', clip: clip.clip, time: clip.start + store.scrub }, '分割镜头')
+    }
+    function fcReorder(clipId, target, after) {
+      return fcWorkflow({ operation: 'reorder', clip: clipId, target: target, after: after === true }, '调整顺序')
+    }
+
+    // Native drag events support both the horizontal timeline and vertical list.
+    // No repaint during a drag: replacing the dragged DOM node cancels native DnD.
+    function fcDragBindings(clip, vertical) {
+      return {
+        draggable: store.busy === '',
+        onDragStart: function (event) {
+          if (store.busy) { event.preventDefault(); return }
+          store.dragClip = clip.clip
+          store.dragSequence = fcSequence().id
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = 'move'
+            event.dataTransfer.setData('text/plain', String(clip.clip))
+          }
+        },
+        onDragOver: function (event) {
+          const source = fcClips().find(function (entry) { return entry.clip === store.dragClip })
+          if (!source || source.clip === clip.clip || source.track !== clip.track || store.busy) return
+          event.preventDefault()
+          if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+          const box = event.currentTarget.getBoundingClientRect()
+          const after = vertical ? event.clientY >= box.top + box.height / 2 : event.clientX >= box.left + box.width / 2
+          event.currentTarget.classList.toggle('fc-drop-after', after)
+          event.currentTarget.classList.toggle('fc-drop-before', !after)
+        },
+        onDragLeave: function (event) { event.currentTarget.classList.remove('fc-drop-before', 'fc-drop-after') },
+        onDragEnd: function () {
+          store.dragClip = null
+          store.dragSequence = null
+          if (typeof document.querySelectorAll === 'function') document.querySelectorAll('.fc-drop-before,.fc-drop-after').forEach(function (element) { element.classList.remove('fc-drop-before', 'fc-drop-after') })
+        },
+        onDrop: function (event) {
+          event.preventDefault()
+          event.currentTarget.classList.remove('fc-drop-before', 'fc-drop-after')
+          const source = store.dragClip
+          const valid = store.dragSequence === fcSequence().id
+          store.dragClip = null
+          store.dragSequence = null
+          if (!valid || source === null || source === clip.clip || store.busy) return
+          const box = event.currentTarget.getBoundingClientRect()
+          const after = vertical ? event.clientY >= box.top + box.height / 2 : event.clientX >= box.left + box.width / 2
+          fcReorder(source, clip.clip, after)
+        },
+      }
+    }
+
+    function fcCaptionNew() {
+      const clip = fcSelectedClip()
+      const start = clip ? clip.start + store.scrub : 0
+      const end = Math.min(fcSequence().duration, start + 3)
+      store.captionDraft = { id: null, track: null, text: '', start: fcTc(start), end: fcTc(end) }
+      fcEmit()
+    }
+    function fcCaptionChoose(track, caption) {
+      store.captionDraft = { id: caption.id, track: track.id, text: caption.text, start: fcTc(caption.start), end: fcTc(caption.end) }
+      fcEmit()
+      if (store.prevOpen) fcFrame(caption.start)
+    }
+    async function fcCaptionSave() {
+      const draft = store.captionDraft
+      const result = await fcWorkflow({ operation: 'caption', caption: draft.id, track: draft.track, text: draft.text, start: draft.start, end: draft.end }, draft.id ? '修改字幕' : '添加字幕')
+      if (result) fcCaptionNew()
+    }
+    function fcCaptionDelete(track, caption) {
+      return fcWorkflow({ operation: 'caption', track: track.id, caption: caption.id, remove: true }, '删除字幕').then(function (result) {
+        if (result && store.captionDraft.id === caption.id) fcCaptionNew()
+      })
+    }
+    function fcTransition(options) {
+      const clip = fcSelectedClip()
+      if (!clip) return
+      return fcWorkflow(Object.assign({ operation: 'transition', clip: clip.clip, effect: store.transitionEffect, edge: store.transitionEdge, duration: store.transitionDuration }, options || {}), options && options.remove ? '移除转场' : '设置转场')
+    }
+
     // ── 20-css.js ────────────────────────────────────────────────────
     // ── styles ──────────────────────────────────────────────────────────────────
     // Injected once by apply(). Three rules that must survive any redesign:
@@ -1167,6 +1298,20 @@ window.__ModuleLoader__.load({
         '.fc-root :focus-visible{outline:2px solid var(--bar);outline-offset:1px;border-radius:var(--r-xs)}',
         '.fc-mono,.fc-path,.fc-meta,.fc-clip-t,.fc-num,.fc-stat-v.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}',
 
+        // ── compact timeline ─────────────────────────────────────────────────────
+        '.fc-timeline{min-width:0}',
+        '.fc-tl-ruler{margin-left:34px;display:flex;justify-content:space-between;color:var(--dim);font:10px var(--mono);padding-bottom:4px}',
+        '.fc-tl-row{display:flex;gap:6px;margin-bottom:4px;min-width:0}',
+        '.fc-tl-label{width:28px;flex:0 0 28px;font:10px var(--mono);padding-top:8px;color:var(--dim)}',
+        '.fc-tl-label small{display:block;font:9px var(--ui)}',
+        '.fc-tl-track{position:relative;flex:1;min-width:0;background:var(--surface);border-radius:3px}',
+        '.fc-tl-clip{position:absolute;min-width:0;height:24px;margin:0;padding:2px 4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border:1px solid var(--line);border-radius:3px;font:10px var(--ui);text-align:left;color:var(--fg);background:color-mix(in srgb,var(--bar) 18%,var(--surface))}',
+        'button.fc-tl-clip{cursor:pointer}',
+        '.fc-tl-clip.audio{background:color-mix(in srgb,var(--ok) 18%,var(--surface))}',
+        '.fc-tl-clip.on{border-color:var(--bar);box-shadow:inset 0 0 0 1px var(--bar)}',
+        '.fc-tl-clip.off{opacity:.5;text-decoration:line-through}',
+        '.fc-tl-gap{position:absolute;top:2px;bottom:2px;border:1px dashed var(--line);pointer-events:none}',
+        '.fc-tl-overlap{position:absolute;bottom:0;height:3px;background:var(--err);pointer-events:none}',
         // ── shell ────────────────────────────────────────────────────────────────
         '.fc-wrap{width:100%;padding:10px;font-size:12.5px;line-height:1.55}',
         '.fc-wrap.wide{max-width:1100px;margin:0 auto;padding:20px;font-size:13px}',
@@ -1269,6 +1414,16 @@ window.__ModuleLoader__.load({
         '.fc-prog-fill{height:100%;background:var(--bar);border-radius:999px;transition:width .5s ease}',
 
         // ── scrollbars ───────────────────────────────────────────────────────────
+        '.fc-edit-time{flex:1;min-width:0;width:80px;height:25px;padding:0 5px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);color:var(--fg);font:11px var(--mono)}',
+        '.fc-caption-text{display:block;box-sizing:border-box;width:100%;min-height:60px;resize:vertical;padding:6px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);color:var(--fg);font-family:inherit;font-size:12px;line-height:1.5;margin-bottom:5px}',
+        '.fc-caption-list{max-height:170px;overflow:auto}',
+        '.fc-caption-row{display:flex;gap:6px;align-items:center;border-top:1px solid var(--line-soft);padding:4px 0}',
+        '.fc-caption-pick{display:flex;flex-direction:column;flex:1;min-width:0;text-align:left;padding:3px;border:0;background:transparent;color:var(--fg);cursor:pointer;font:inherit}',
+        '.fc-caption-line{width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}',
+        '.fc-drop-before{box-shadow:inset 3px 0 var(--bar)!important}.fc-drop-after{box-shadow:inset -3px 0 var(--bar)!important}',
+        '.fc-clip.fc-drop-before{box-shadow:inset 0 3px var(--bar)!important}.fc-clip.fc-drop-after{box-shadow:inset 0 -3px var(--bar)!important}',
+        '.fc-tl-clip[draggable=true]{cursor:grab}.fc-tl-clip.caption{background:#5d4482;color:#fff}',
+        '.fc-tl-transition{position:absolute;height:4px;bottom:0;min-width:3px;background:#ae87df;pointer-events:none}',
         '.fc-root ::-webkit-scrollbar{width:9px;height:9px}',
         '.fc-root ::-webkit-scrollbar-thumb{background:var(--line);border-radius:999px;border:2px solid var(--bg)}',
         '.fc-root ::-webkit-scrollbar-thumb:hover{background:var(--dim)}',
@@ -1294,6 +1449,185 @@ window.__ModuleLoader__.load({
         // ── motion preferences ───────────────────────────────────────────────────
         '@media (prefers-reduced-motion:reduce){.fc-root *,.fc-root *::before,.fc-root *::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}}',
       ].join('')
+    }
+
+    // ── 25-timeline.js ───────────────────────────────────────────────
+    // Compact timeline geometry with same-track drag sorting.
+    // Intervals are arranged into lanes so overlaps never hide another clip.
+    function fcTimelineLayout(sequence) {
+      const rows = []
+      let duration = Math.max(0, Number(sequence && sequence.duration) || 0)
+      for (const kind of ['video', 'audio']) {
+        const tracks = sequence && sequence.tracks && sequence.tracks[kind] || []
+        for (const track of tracks) {
+          const items = (track.items || []).filter(function (clip) {
+            return Number.isFinite(clip.start) && Number.isFinite(clip.dur) && clip.dur > 0 && clip.start + clip.dur > 0
+          }).slice().sort(function (a, b) { return a.start - b.start || a.clip - b.clip })
+          if (items.length === 0) continue
+          const ends = []
+          const clips = []
+          const gaps = []
+          const overlaps = []
+          let covered = 0
+          for (const clip of items) {
+            const start = Math.max(0, clip.start)
+            const end = clip.start + clip.dur
+            if (start > covered + 1e-7) gaps.push({ start: covered, end: start })
+            if (start < covered - 1e-7) overlaps.push({ start: start, end: Math.min(covered, end) })
+            let lane = ends.findIndex(function (value) { return value <= start + 1e-7 })
+            if (lane < 0) lane = ends.length
+            ends[lane] = end
+            clips.push({ clip: clip, start: start, end: end, lane: lane })
+            covered = Math.max(covered, end)
+            duration = Math.max(duration, end)
+          }
+          rows.push({ track: track, kind: kind, clips: clips, gaps: gaps, overlaps: overlaps, lanes: ends.length, end: covered })
+        }
+      }
+      for (const row of rows) if (row.end < duration - 1e-7) row.gaps.push({ start: row.end, end: duration })
+      return { duration: Number.isFinite(duration) ? duration : 0, rows: rows }
+    }
+
+    function FcTimeline() {
+      const sequence = fcSequence()
+      const layout = fcTimelineLayout(sequence)
+      if (layout.duration <= 0 || layout.rows.length === 0) return h('div', { className: 'fc-empty' }, '序列里还没有片段')
+      const videos = fcClips()
+      const busy = store.busy !== ''
+      const scale = 100 / layout.duration
+      const position = function (span) {
+        return { left: (span.start * scale) + '%', width: ((span.end - span.start) * scale) + '%' }
+      }
+      return h('div', { className: 'fc-timeline', 'aria-label': '音视频时间线' },
+        h('div', { className: 'fc-tl-ruler', 'aria-hidden': true },
+          h('span', null, fcTime(0)), h('span', null, fcTime(layout.duration / 2)), h('span', null, fcTime(layout.duration))),
+        layout.rows.map(function (row) {
+          const track = row.track
+          return h('div', { className: 'fc-tl-row', key: row.kind + track.id },
+            h('div', { className: 'fc-tl-label', title: track.label + (track.muted ? ' · 静音' : '') },
+              track.label, track.muted ? h('small', null, '静音') : null),
+            h('div', { className: 'fc-tl-track', style: { height: (row.lanes * 28 + 4) + 'px' } },
+              row.gaps.map(function (gap, index) {
+                return h('span', { key: 'gap-' + index, className: 'fc-tl-gap', style: position(gap), title: '轨内空隙 ' + fcTime(gap.start) + '–' + fcTime(gap.end) })
+              }),
+              row.clips.map(function (span) {
+                const clip = span.clip
+                const video = row.kind === 'video' ? clip : videos.find(function (candidate) {
+                  return clip.link !== null && clip.link !== undefined && candidate.link === clip.link
+                })
+                const selected = !!video && video.clip === store.clipId
+                const label = track.label + ' · ' + clip.name + ' · ' + fcTime(span.start) + '–' + fcTime(span.end)
+                const style = Object.assign(position(span), { top: (span.lane * 28 + 2) + 'px' })
+                const props = {
+                  key: 'clip-' + clip.clip,
+                  className: 'fc-tl-clip ' + row.kind + (selected ? ' on' : '') + (clip.enabled === false ? ' off' : ''),
+                  style: style,
+                  title: label + (clip.enabled === false ? ' · 停用' : '') + (video ? '（点击选中视频）' : ''),
+                  'aria-label': label,
+                }
+                if (video) {
+                  props.type = 'button'
+                  props.disabled = busy
+                  props['aria-pressed'] = selected
+                  props.onClick = function () { fcSelectClip(video.clip) }
+                  if (row.kind === 'video') Object.assign(props, fcDragBindings(clip, false))
+                }
+                return h(video ? 'button' : 'span', props, clip.name || String(clip.clip))
+              }),
+              (track.transitions || []).map(function (entry) {
+                return h('span', { key: 'transition-' + entry.id, className: 'fc-tl-transition', style: position({ start: entry.start, end: entry.start + entry.dur }), title: '转场 · ' + (FC_TRANSITION_NAMES[entry.effect] || entry.effect) })
+              }),
+              row.overlaps.map(function (overlap, index) {
+                return h('span', { key: 'overlap-' + index, className: 'fc-tl-overlap', style: position(overlap), title: '片段重叠 ' + fcTime(overlap.start) + '–' + fcTime(overlap.end) })
+              })))
+        }),
+        (sequence.captionTracks || []).map(function (track) {
+          return h('div', { className: 'fc-tl-row', key: 'caption-' + track.id },
+            h('div', { className: 'fc-tl-label' }, track.label),
+            h('div', { className: 'fc-tl-track', style: { height: '32px' } }, track.items.map(function (caption) {
+              return h('button', { type: 'button', key: caption.id, className: 'fc-tl-clip caption', style: Object.assign(position(caption), { top: '2px' }), disabled: busy, title: caption.text, onClick: function () { fcCaptionChoose(track, caption) } }, caption.text)
+            })))
+        }),
+        h('div', { className: 'fc-hint' }, '拖动视频到同轨镜头前后可排序，该轨镜头将首尾相接；片段列表也支持拖动。虚线为空隙，红线为重叠，紫条为转场。'))
+    }
+
+    // ── 28-editing-ui.js ─────────────────────────────────────────────
+    function PrecisionEditor() {
+      const clip = fcSelectedClip()
+      const disabled = store.busy !== '' || !clip
+      return h('div', { className: 'fc-sec' },
+        h('div', { className: 'fc-sec-h' }, '精确裁切'),
+        clip ? h('div', { className: 'fc-hint fc-mono' }, '源入点 ' + fcTc(clip.sourceIn) + ' · 出点 ' + fcTc(clip.sourceOut)) : null,
+        ['in', 'out'].map(function (edge) {
+          return h('div', { className: 'fc-row', key: edge },
+            h('span', { className: 'fc-lb' }, edge === 'in' ? '裁头' : '裁尾'),
+            [-5, -1, 1, 5].map(function (frames) {
+              return h(FcBtn, { key: frames, disabled: disabled, title: (frames > 0 ? '裁掉 ' : '延长 ') + Math.abs(frames) + ' 帧', onClick: function () { fcTrimExact(edge, frames + 'f') } }, (frames > 0 ? '+' : '−') + Math.abs(frames) + 'f')
+            }))
+        }),
+        h('div', { className: 'fc-row' },
+          h('select', { className: 'fc-sel', value: store.trimEdge, disabled: disabled, 'aria-label': '裁切位置', onChange: function (event) { store.trimEdge = event.target.value; fcEmit() } }, h('option', { value: 'in' }, '裁头'), h('option', { value: 'out' }, '裁尾')),
+          h('input', { className: 'fc-edit-time', value: store.trimInput, disabled: disabled, 'aria-label': '裁切量', placeholder: '12f / 0.5s / 时间码', onChange: function (event) { store.trimInput = event.target.value; fcEmit() } }),
+          h(FcBtn, { disabled: disabled, onClick: function () { fcTrimExact(store.trimEdge, store.trimInput) } }, '应用裁切')),
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-clip-t fc-mono' }, '播放头 ' + fcTc(clip ? clip.start + store.scrub : 0)),
+          h(FcBtn, { disabled: disabled || store.scrub <= 0 || (clip && store.scrub >= clip.dur), onClick: fcSplit }, '在此分割')),
+        h('div', { className: 'fc-hint' }, '正数裁短，负数延长；支持秒、帧和非丢帧时间码。后方镜头随裁切移动。'))
+    }
+
+    function CaptionEditor() {
+      const sequence = fcSequence()
+      const tracks = sequence.captionTracks || []
+      const draft = store.captionDraft
+      const busy = store.busy !== ''
+      const set = function (key) { return function (event) { draft[key] = event.target.value; fcEmit() } }
+      return h(FcSection, { title: '字幕' },
+        h('div', { className: 'fc-row' },
+          h(FcBtn, { disabled: busy, onClick: fcCaptionNew }, '从播放头新建'),
+          h('span', { className: 'fc-clip-t' }, draft.id ? '正在修改字幕' : '新字幕')),
+        h('textarea', { className: 'fc-caption-text', 'aria-label': '字幕内容', placeholder: '输入字幕，支持换行', maxLength: 4000, value: draft.text, disabled: busy, onChange: set('text') }),
+        h('div', { className: 'fc-row' },
+          h('label', { className: 'fc-lb' }, '起止'),
+          h('input', { className: 'fc-edit-time', 'aria-label': '字幕起点', value: draft.start, disabled: busy, onChange: set('start') }),
+          h('span', null, '→'),
+          h('input', { className: 'fc-edit-time', 'aria-label': '字幕终点', value: draft.end, disabled: busy, onChange: set('end') })),
+        h('div', { className: 'fc-row' },
+          h(FcBtn, { primary: true, disabled: busy || !draft.text.trim(), onClick: fcCaptionSave }, draft.id ? '保存字幕' : '添加字幕'),
+          draft.id ? h(FcBtn, { disabled: busy, onClick: fcCaptionNew }, '取消修改') : null),
+        h('div', { className: 'fc-caption-list' }, tracks.map(function (track) {
+          return track.items.map(function (caption) {
+            return h('div', { className: 'fc-caption-row', key: caption.id },
+              h('button', { className: 'fc-caption-pick', type: 'button', disabled: busy, title: caption.text, onClick: function () { fcCaptionChoose(track, caption) } },
+                h('span', { className: 'fc-clip-t' }, track.label + ' ' + fcTc(caption.start) + '–' + fcTc(caption.end)), h('span', { className: 'fc-caption-line' }, caption.text)),
+              h(FcBtn, { danger: true, disabled: busy, onClick: function () { fcCaptionDelete(track, caption) } }, '删除'))
+          })
+        })),
+        h('div', { className: 'fc-hint' }, '起止按整个序列计时，可填秒、帧或时间码。字幕会渲染到成片中；调整镜头后请复核字幕时间。'))
+    }
+
+    const FC_TRANSITION_NAMES = { cross_dissolve: '交叉溶解', dip_to_black: '淡入淡出黑场' }
+    function TransitionEditor() {
+      const clip = fcSelectedClip()
+      const sequence = fcSequence()
+      const track = clip && sequence.tracks.video.find(function (entry) { return entry.id === clip.track })
+      const transitions = track ? (track.transitions || []).filter(function (entry) { return entry.from === clip.clip || entry.to === clip.clip }) : []
+      const disabled = store.busy !== '' || !clip
+      return h(FcSection, { title: '视频转场' },
+        h('div', { className: 'fc-row' },
+          h('select', { className: 'fc-sel', 'aria-label': '转场类型', value: store.transitionEffect, disabled: disabled, onChange: function (event) { store.transitionEffect = event.target.value; fcEmit() } },
+            Object.keys(FC_TRANSITION_NAMES).map(function (id) { return h('option', { value: id, key: id }, FC_TRANSITION_NAMES[id]) })),
+          h('select', { className: 'fc-sel', 'aria-label': '转场位置', value: store.transitionEdge, disabled: disabled, onChange: function (event) { store.transitionEdge = event.target.value; fcEmit() } }, h('option', { value: 'in' }, '镜头开头'), h('option', { value: 'out' }, '镜头结尾'))),
+        h('div', { className: 'fc-row' },
+          h('span', { className: 'fc-lb' }, '时长'),
+          h('input', { className: 'fc-edit-time', 'aria-label': '转场时长', value: store.transitionDuration, disabled: disabled, onChange: function (event) { store.transitionDuration = event.target.value; fcEmit() } }),
+          h(FcBtn, { disabled: disabled, onClick: function () { fcTransition() } }, '添加转场')),
+        transitions.map(function (entry) {
+          return h('div', { className: 'fc-row', key: entry.id },
+            h('span', { className: 'fc-clip-name' }, (FC_TRANSITION_NAMES[entry.effect] || entry.effect) + ' · ' + Math.round(entry.dur * fcFps()) + 'f'),
+            h(FcBtn, { disabled: disabled, onClick: function () { fcTransition({ transition: entry.id }) } }, '更新时长'),
+            h(FcBtn, { danger: true, disabled: disabled, onClick: function () { fcTransition({ transition: entry.id, remove: true }) } }, '移除'))
+        }),
+        h('div', { className: 'fc-hint' }, '相邻镜头衔接处添加转场；序列首尾可淡入淡出。排序前请先移除该轨转场。'))
     }
 
     // ── 30-ui.js ─────────────────────────────────────────────────────
@@ -1445,16 +1779,16 @@ window.__ModuleLoader__.load({
         clip === null ? null : h('div', { className: 'fc-row' },
           h('span', { className: 'fc-lb' }, '时间'),
           h(FcBtn, {
-            disabled: busy || store.frameBusy, title: '往前 0.5 秒',
-            onClick: function () { fcScrub(Math.max(0, store.scrub - 0.5)) },
+            disabled: busy || store.frameBusy, title: '往前一帧',
+            onClick: function () { fcScrub(store.scrub - 1 / fcFps()) },
           }, '◀'),
           h('input', {
-            className: 'fc-range', type: 'range', min: 0, max: Math.max(0.001, clip.dur), step: 0.05,
+            className: 'fc-range', type: 'range', min: 0, max: Math.max(0, clip.dur - 1 / fcFps()), step: 1 / fcFps(), disabled: busy,
             value: store.scrub, onChange: function (event) { fcScrub(Number(event.target.value)) },
           }),
           h(FcBtn, {
-            disabled: busy || store.frameBusy, title: '往后 0.5 秒',
-            onClick: function () { fcScrub(Math.min(clip.dur, store.scrub + 0.5)) },
+            disabled: busy || store.frameBusy, title: '往后一帧',
+            onClick: function () { fcScrub(store.scrub + 1 / fcFps()) },
           }, '▶'),
           h('span', { className: 'fc-clip-t' }, store.scrub.toFixed(2) + ' / ' + clip.dur.toFixed(2) + 's')),
 
@@ -1511,19 +1845,12 @@ window.__ModuleLoader__.load({
           clips.map(function (clip, index) {
             const on = clip.clip === store.clipId
             const picked = multi.indexOf(clip.clip) >= 0
-            return h('div', {
+            return h('div', Object.assign({
               className: 'fc-clip' + (on ? ' on' : ''),
               key: 'clip-' + clip.clip,
               title: clip.name,
-              onClick: function () {
-                if (store.clipId === clip.clip) return
-                store.clipId = clip.clip
-                store.scrub = 0
-                store.proxyUrl = ''
-                fcEmit()
-                if (store.prevOpen) fcFrame(clip.start)
-              },
-            },
+              onClick: function () { fcSelectClip(clip.clip) },
+            }, fcDragBindings(clip, true)),
               h('span', {
                 className: 'fc-clip-n',
                 style: { cursor: 'pointer', color: picked ? 'var(--bar)' : undefined, fontWeight: picked ? 700 : 400 },
@@ -1544,7 +1871,8 @@ window.__ModuleLoader__.load({
     function EditActions() {
       const clip = fcSelectedClip()
       const clips = fcClips()
-      const index = clip === null ? -1 : clips.indexOf(clip)
+      const sameTrack = clip ? clips.filter(function (entry) { return entry.track === clip.track }) : []
+      const index = clip === null ? -1 : sameTrack.indexOf(clip)
       const busy = store.busy !== ''
       const presets = store.workspace && Array.isArray(store.workspace.presets) ? store.workspace.presets : []
       return h('div', null,
@@ -1568,7 +1896,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'fc-row' },
           h('span', { className: 'fc-lb' }, '排序'),
           h(FcBtn, { disabled: busy || clip === null || index <= 0, onClick: function () { fcMoveClip(-1) } }, '◀ 上移'),
-          h(FcBtn, { disabled: busy || clip === null || index >= clips.length - 1, onClick: function () { fcMoveClip(1) } }, '下移 ▶'),
+          h(FcBtn, { disabled: busy || clip === null || index >= sameTrack.length - 1, onClick: function () { fcMoveClip(1) } }, '下移 ▶'),
           h(FcBtn, { danger: true, disabled: busy || clip === null, onClick: fcDeleteClip }, '删除')),
 
         h('div', { className: 'fc-row' },
@@ -1740,6 +2068,10 @@ window.__ModuleLoader__.load({
 
             h(PreviewBlock, null),
 
+            h(FcSection, { title: '时间线' }, h(FcTimeline, null)),
+
+            h(PrecisionEditor, null),
+
             h(FcSection, { title: '片段 (' + fcClips().length + ')' }, h(ClipList, null)),
 
             h(FcSection, { title: '素材' },
@@ -1774,6 +2106,9 @@ window.__ModuleLoader__.load({
               store.browseOpen ? h(FcBrowsePicker, { kind: 'media', onPick: fcStage }) : null),
 
             clip === null ? h('div', { className: 'fc-hint' }, '选一个片段就能剪。') : h(EditActions, null),
+
+            h(CaptionEditor, null),
+            h(TransitionEditor, null),
 
             h(ExportBlock, null)))
     }

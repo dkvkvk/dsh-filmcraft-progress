@@ -134,6 +134,15 @@ function fcSelectedClip() {
   for (const clip of clips) if (clip.clip === store.clipId) return clip
   return null
 }
+function fcSelectClip(id) {
+  const clip = fcClips().find(function (candidate) { return candidate.clip === id })
+  if (!clip || store.clipId === id || store.busy !== '') return
+  fcDropUrls()
+  store.clipId = id
+  store.scrub = 0
+  fcEmit()
+  if (store.prevOpen) fcFrame(clip.start)
+}
 function fcPreset(id) {
   const presets = store.workspace && Array.isArray(store.workspace.presets) ? store.workspace.presets : []
   for (const preset of presets) if (preset.id === id) return preset
@@ -201,6 +210,12 @@ function fcDropUrls() {
 
 function fcSetDetail(detail, options) {
   const keep = !!(options && options.keep)
+  const switched = !store.detail || !detail || store.detail.path !== detail.path || store.detail.activeSequence !== detail.activeSequence
+  if (switched) {
+    store.captionDraft = { id: null, track: null, text: '', start: '0', end: '3' }
+    store.dragClip = null
+    store.dragSequence = null
+  }
   fcDropUrls()
   store.detail = detail || null
   store.projectId = detail && detail.projectId ? detail.projectId : ''
@@ -212,6 +227,8 @@ function fcSetDetail(detail, options) {
   let found = false
   for (const clip of clips) if (clip.clip === store.clipId) found = true
   if (!found) store.clipId = clips.length > 0 ? clips[0].clip : null
+  const selected = fcSelectedClip()
+  if (selected) store.scrub = Math.min(store.scrub, Math.max(0, selected.dur - 1 / fcFps()))
   fcEmit()
   // Every detail read is a chance that the picture changed (an edit, a sequence
   // switch, a different project). Refreshing it here keeps the preview honest
@@ -281,7 +298,7 @@ async function fcActivateSequence(id) {
 // ── editing ─────────────────────────────────────────────────────────────────
 async function fcEdit(commands, label) {
   const result = await fcRun(label, function () {
-    return host.call('edit.write', { project: fcProjectRef(), commands: commands })
+    return host.call('edit.write', { project: fcProjectRef(), commands: commands, atomic: true })
   })
   if (!result) return null
   if (result.detail) fcSetDetail(result.detail, { keep: true })
@@ -296,11 +313,7 @@ async function fcEdit(commands, label) {
 }
 
 function fcTrim(edge, deltaSec) {
-  const clip = fcSelectedClip()
-  if (!clip) return
-  const delta = Math.round(deltaSec * TICKS)
-  fcEdit([{ id: 'timeline.trim', params: { clip: clip.clip, edge: edge, mode: 'ripple', delta: delta } }],
-    (edge === 'in' ? '裁头 ' : '裁尾 ') + (deltaSec > 0 ? '+' : '') + deltaSec + 's ')
+  return fcTrimExact(edge, deltaSec)
 }
 
 function fcDeleteClip() {
@@ -312,16 +325,11 @@ function fcDeleteClip() {
 function fcMoveClip(dir) {
   const clip = fcSelectedClip()
   if (!clip) return
-  const clips = fcClips()
+  const clips = fcClips().filter(function (entry) { return entry.track === clip.track })
   const index = clips.indexOf(clip)
   const next = clips[dir < 0 ? index - 1 : index + 1]
   if (!next) return
-  // Swap by moving each clip to the other's start time. Two commands, one
-  // snapshot: the host treats the batch as a single undo step.
-  fcEdit([
-    { id: 'timeline.move', params: { moves: [{ clip: clip.clip, track: clip.track, time: Math.round(next.start * TICKS) }] } },
-    { id: 'timeline.move', params: { moves: [{ clip: next.clip, track: next.track, time: Math.round(clip.start * TICKS) }] } },
-  ], dir < 0 ? '上移 ' : '下移 ')
+  return fcReorder(clip.clip, next.clip, dir > 0)
 }
 
 function fcToggleClip() {
@@ -398,7 +406,9 @@ async function fcFrame(seconds) {
 // Scrubbing should not spawn one render process per pixel. 400 ms after the last
 // move is slow enough to coalesce a drag and fast enough to feel immediate.
 function fcScrub(seconds) {
-  store.scrub = Math.max(0, Number(seconds) || 0)
+  const selected = fcSelectedClip()
+  const fps = fcFps()
+  store.scrub = Math.max(0, Math.min(Math.round((Number(seconds) || 0) * fps) / fps, selected ? Math.max(0, selected.dur - 1 / fps) : 0))
   fcEmit()
   if (!store.prevOpen) return
   if (store.scrubTimer !== null) clearTimeout(store.scrubTimer)

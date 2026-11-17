@@ -45,7 +45,8 @@ function runAsync(config, args, label, timeoutMs) {
     try { fd = openSync(log, 'w') } catch (_) { fd = -1 }
     let child
     try {
-      child = spawn(config.cliPath, args, {
+      const command = engineInvocation(config.cliPath, args)
+      child = spawn(command.file, command.args, {
         stdio: fd >= 0 ? ['ignore', fd, fd] : 'ignore',
         windowsHide: true,
       })

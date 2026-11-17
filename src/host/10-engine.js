@@ -14,6 +14,14 @@
 const ENGINE_TIMEOUT_MS = 120000
 const ENGINE_TIMEOUT_LONG_MS = 600000
 
+// Windows cannot execute a Node script by its shebang. Use the same Node
+// runtime for script-based CLI adapters, without a shell or command quoting.
+function engineInvocation(cliPath, args) {
+  return /\.(?:mjs|cjs|js)$/i.test(cliPath)
+    ? { file: process.execPath, args: [cliPath].concat(args) }
+    : { file: cliPath, args: args }
+}
+
 function logPathFor(config, label) {
   const paths = pathsOf(config.root)
   ensureDir(paths.logs)
@@ -24,10 +32,11 @@ function logPathFor(config, label) {
 // stdout and stderr share one fd, so ordering between them is preserved the way
 // a terminal would show it.
 function spawnCapture(cliPath, args, log, timeoutMs) {
+  const command = engineInvocation(cliPath, args)
   let fd = -1
   try { fd = openSync(log, 'w') } catch (_) { fd = -1 }
   if (fd < 0) {
-    const fallback = spawnSync(cliPath, args, { encoding: 'utf8', timeout: timeoutMs || ENGINE_TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
+    const fallback = spawnSync(command.file, command.args, { encoding: 'utf8', timeout: timeoutMs || ENGINE_TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
     return {
       ok: fallback.status === 0,
       status: fallback.status === null ? -1 : fallback.status,
@@ -38,7 +47,7 @@ function spawnCapture(cliPath, args, log, timeoutMs) {
   }
   let result
   try {
-    result = spawnSync(cliPath, args, { stdio: ['ignore', fd, fd], timeout: timeoutMs || ENGINE_TIMEOUT_MS, windowsHide: true })
+    result = spawnSync(command.file, command.args, { stdio: ['ignore', fd, fd], timeout: timeoutMs || ENGINE_TIMEOUT_MS, windowsHide: true })
   } finally {
     try { closeSync(fd) } catch (_) { }
   }
@@ -51,7 +60,7 @@ function spawnCapture(cliPath, args, log, timeoutMs) {
     ok: result && result.status === 0,
     status: result && typeof result.status === 'number' ? result.status : -1,
     stdout: text,
-    stderr: '',
+    stderr: result && result.error ? String(result.error.message) : '',
     log,
     timedOut: !!(result && result.error && String(result.error.code) === 'ETIMEDOUT'),
   }
@@ -71,7 +80,7 @@ function parseJsonText(text) {
 }
 
 function engineError(result, what) {
-  const detail = String(result.stdout || '').trim()
+  const detail = String(result.stdout || result.stderr || '').trim()
   const timedOut = result.timedOut ? '（超时）' : ''
   return new Error(what + '失败' + timedOut + (detail === '' ? '' : ': ' + detail.split('\n').slice(-6).join(' ')))
 }
@@ -253,6 +262,15 @@ const EDIT_COMMANDS = {
   'file.exportInterchange': true,
   'sequence.open': true,
   'sequence.settings': true,
+  'sequence.applyVideoTransition': true,
+  'sequence.setTransition': true,
+  'sequence.removeTransition': true,
+  'captions.newTrack': true,
+  'captions.setStyle': true,
+  'captions.add': true,
+  'captions.setText': true,
+  'captions.setTimes': true,
+  'captions.delete': true,
   'markers.add': true,
   'markers.addRange': true,
   'markers.clearAll': true,

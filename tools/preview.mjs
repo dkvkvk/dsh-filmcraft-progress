@@ -98,7 +98,7 @@ globalThis.URL.revokeObjectURL = () => { }
 // ── fixtures ────────────────────────────────────────────────────────────────
 const ROOT = 'D:\\Myfiles\\FilmCraft'
 const WORKSPACE = {
-  ok: true, version: '0.3.0', root: 'D:/Myfiles/FilmCraft', rootDisplay: ROOT,
+  ok: true, version: '0.6.0', root: 'D:/Myfiles/FilmCraft', rootDisplay: ROOT,
   paths: { registry: ROOT + '\\registry.json', projects: ROOT + '\\projects', exports: ROOT + '\\exports', work: ROOT + '\\work', jobs: ROOT + '\\jobs.json', previews: ROOT + '\\previews' },
   cli: { path: 'C:\\Program Files\\FilmCraft\\filmcraft-cli.exe', exists: true },
   settings: { root: 'D:/Myfiles/FilmCraft', previewSeconds: 3, preset: 'neutral' },
@@ -124,6 +124,8 @@ const clip = (id, name, start, dur, effects) => ({
 })
 const DETAIL = {
   ok: true,
+  projectId: 'p1', projectName: '深圳天文台', name: '深圳天文台',
+  path: ROOT + '\\projects\\深圳天文台.fcproj', revision: 12,
   project: { id: 'p1', name: '深圳天文台', file: ROOT + '\\projects\\深圳天文台.fcproj' },
   sequence: {
     id: 9, name: '序列 1', duration: 26.4, frames: 1582, width: 3840, height: 2880, fps: 59.94,
@@ -159,8 +161,22 @@ const DETAIL = {
   ],
   missing: 0,
 }
+// Include linked sound so the compact timeline is checked on both kinds.
+for (const item of DETAIL.sequence.clips) item.link = 'pair-' + item.clip
+const sound = DETAIL.sequence.clips.map((item) => ({
+  ...item, clip: item.clip + 1000, kind: 'audio', track: 'A1', trackLabel: 'A1', effects: [],
+}))
+DETAIL.sequence.tracks.audio = [{ id: 'A1', label: 'A1', kind: 'audio', muted: false, items: sound }]
+DETAIL.sequence.clips.push(...sound)
+DETAIL.sequence.captionTracks = [{ id: 300, label: 'C1', name: '字幕', enabled: true, items: [
+  { id: 301, text: '海风吹过，记录此刻。', start: 1, end: 4 },
+  { id: 302, text: '下一站，继续出发。', start: 10, end: 13 },
+] }]
+DETAIL.sequence.tracks.video[0].transitions = [{ id: 401, effect: 'cross_dissolve', from: 69, to: 70, start: 9.209, dur: 0.5 }]
+
 const JOB = (id, kind, state, pct) => ({
   id, kind, state, createdAt: '2026-10-21T08:15:12.738Z', startedAt: '2026-10-21T08:15:13.000Z',
+  project: { id: 'p1', name: '深圳天文台', file: DETAIL.path },
   endedAt: state === 'running' ? null : '2026-10-21T08:16:40.000Z',
   out: ROOT + '\\exports\\深圳天文台_1.mp4', bytes: state === 'done' ? 7439786 : null,
   progress: state === 'running' ? { ratio: pct, frames: 210, total: 1582 } : { ratio: 1, frames: 1582, total: 1582 },
@@ -348,7 +364,8 @@ const opener = find(tree, (n) => {
 })[0]
 if (opener) { opener.props.onClick(); render(); await sleep(250); if (dirty) render(); await sleep(150); if (dirty) render() }
 
-const PAGES = ['项目', '剪辑', '合并', '任务', '设置']
+const editingFocus = process.argv.includes('--editing')
+const PAGES = editingFocus ? ['剪辑'] : ['项目', '剪辑', '合并', '任务', '设置']
 const shots = []
 for (const label of PAGES) {
   const tabNode = find(tree, (n) => {
@@ -361,7 +378,15 @@ for (const label of PAGES) {
   if (dirty) render()
   await sleep(80)
   if (dirty) render()
-  shots.push({ label, body: html(tree, null) })
+  if (editingFocus) {
+    const sections = find(tree, (node) => node.props && node.props.className === 'fc-sec')
+    for (const theme of ['dark', 'light']) {
+      for (const group of [{ label: '时间线与精确裁切', titles: ['时间线', '精确裁切'] }, { label: '字幕与转场', titles: ['字幕', '视频转场'] }]) {
+        const body = sections.filter((node) => group.titles.some((title) => textOf(node).join('').startsWith(title))).map((node) => html(node, null)).join('')
+        shots.push({ label: group.label + ' · ' + theme, body: '<div class="fc-root ' + theme + '">' + body + '</div>' })
+      }
+    }
+  } else shots.push({ label, body: html(tree, null) })
 }
 
 const panel = (inner, width) => '<div class="stage" style="width:' + width + 'px">' + inner + '</div>'

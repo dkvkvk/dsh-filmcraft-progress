@@ -146,16 +146,16 @@ function PreviewBlock() {
     clip === null ? null : h('div', { className: 'fc-row' },
       h('span', { className: 'fc-lb' }, '时间'),
       h(FcBtn, {
-        disabled: busy || store.frameBusy, title: '往前 0.5 秒',
-        onClick: function () { fcScrub(Math.max(0, store.scrub - 0.5)) },
+        disabled: busy || store.frameBusy, title: '往前一帧',
+        onClick: function () { fcScrub(store.scrub - 1 / fcFps()) },
       }, '◀'),
       h('input', {
-        className: 'fc-range', type: 'range', min: 0, max: Math.max(0.001, clip.dur), step: 0.05,
+        className: 'fc-range', type: 'range', min: 0, max: Math.max(0, clip.dur - 1 / fcFps()), step: 1 / fcFps(), disabled: busy,
         value: store.scrub, onChange: function (event) { fcScrub(Number(event.target.value)) },
       }),
       h(FcBtn, {
-        disabled: busy || store.frameBusy, title: '往后 0.5 秒',
-        onClick: function () { fcScrub(Math.min(clip.dur, store.scrub + 0.5)) },
+        disabled: busy || store.frameBusy, title: '往后一帧',
+        onClick: function () { fcScrub(store.scrub + 1 / fcFps()) },
       }, '▶'),
       h('span', { className: 'fc-clip-t' }, store.scrub.toFixed(2) + ' / ' + clip.dur.toFixed(2) + 's')),
 
@@ -212,19 +212,12 @@ function ClipList() {
       clips.map(function (clip, index) {
         const on = clip.clip === store.clipId
         const picked = multi.indexOf(clip.clip) >= 0
-        return h('div', {
+        return h('div', Object.assign({
           className: 'fc-clip' + (on ? ' on' : ''),
           key: 'clip-' + clip.clip,
           title: clip.name,
-          onClick: function () {
-            if (store.clipId === clip.clip) return
-            store.clipId = clip.clip
-            store.scrub = 0
-            store.proxyUrl = ''
-            fcEmit()
-            if (store.prevOpen) fcFrame(clip.start)
-          },
-        },
+          onClick: function () { fcSelectClip(clip.clip) },
+        }, fcDragBindings(clip, true)),
           h('span', {
             className: 'fc-clip-n',
             style: { cursor: 'pointer', color: picked ? 'var(--bar)' : undefined, fontWeight: picked ? 700 : 400 },
@@ -245,7 +238,8 @@ function ClipList() {
 function EditActions() {
   const clip = fcSelectedClip()
   const clips = fcClips()
-  const index = clip === null ? -1 : clips.indexOf(clip)
+  const sameTrack = clip ? clips.filter(function (entry) { return entry.track === clip.track }) : []
+  const index = clip === null ? -1 : sameTrack.indexOf(clip)
   const busy = store.busy !== ''
   const presets = store.workspace && Array.isArray(store.workspace.presets) ? store.workspace.presets : []
   return h('div', null,
@@ -269,7 +263,7 @@ function EditActions() {
     h('div', { className: 'fc-row' },
       h('span', { className: 'fc-lb' }, '排序'),
       h(FcBtn, { disabled: busy || clip === null || index <= 0, onClick: function () { fcMoveClip(-1) } }, '◀ 上移'),
-      h(FcBtn, { disabled: busy || clip === null || index >= clips.length - 1, onClick: function () { fcMoveClip(1) } }, '下移 ▶'),
+      h(FcBtn, { disabled: busy || clip === null || index >= sameTrack.length - 1, onClick: function () { fcMoveClip(1) } }, '下移 ▶'),
       h(FcBtn, { danger: true, disabled: busy || clip === null, onClick: fcDeleteClip }, '删除')),
 
     h('div', { className: 'fc-row' },
@@ -441,6 +435,10 @@ function EditView() {
 
         h(PreviewBlock, null),
 
+        h(FcSection, { title: '时间线' }, h(FcTimeline, null)),
+
+        h(PrecisionEditor, null),
+
         h(FcSection, { title: '片段 (' + fcClips().length + ')' }, h(ClipList, null)),
 
         h(FcSection, { title: '素材' },
@@ -475,6 +473,9 @@ function EditView() {
           store.browseOpen ? h(FcBrowsePicker, { kind: 'media', onPick: fcStage }) : null),
 
         clip === null ? h('div', { className: 'fc-hint' }, '选一个片段就能剪。') : h(EditActions, null),
+
+        h(CaptionEditor, null),
+        h(TransitionEditor, null),
 
         h(ExportBlock, null)))
 }

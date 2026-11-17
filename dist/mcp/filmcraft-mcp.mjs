@@ -327,6 +327,14 @@ function withProjectLock(config, projectFile, owner, fn) {
 const ENGINE_TIMEOUT_MS = 120000
 const ENGINE_TIMEOUT_LONG_MS = 600000
 
+// Windows cannot execute a Node script by its shebang. Use the same Node
+// runtime for script-based CLI adapters, without a shell or command quoting.
+function engineInvocation(cliPath, args) {
+  return /\.(?:mjs|cjs|js)$/i.test(cliPath)
+    ? { file: process.execPath, args: [cliPath].concat(args) }
+    : { file: cliPath, args: args }
+}
+
 function logPathFor(config, label) {
   const paths = pathsOf(config.root)
   ensureDir(paths.logs)
@@ -337,10 +345,11 @@ function logPathFor(config, label) {
 // stdout and stderr share one fd, so ordering between them is preserved the way
 // a terminal would show it.
 function spawnCapture(cliPath, args, log, timeoutMs) {
+  const command = engineInvocation(cliPath, args)
   let fd = -1
   try { fd = openSync(log, 'w') } catch (_) { fd = -1 }
   if (fd < 0) {
-    const fallback = spawnSync(cliPath, args, { encoding: 'utf8', timeout: timeoutMs || ENGINE_TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
+    const fallback = spawnSync(command.file, command.args, { encoding: 'utf8', timeout: timeoutMs || ENGINE_TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
     return {
       ok: fallback.status === 0,
       status: fallback.status === null ? -1 : fallback.status,
@@ -351,7 +360,7 @@ function spawnCapture(cliPath, args, log, timeoutMs) {
   }
   let result
   try {
-    result = spawnSync(cliPath, args, { stdio: ['ignore', fd, fd], timeout: timeoutMs || ENGINE_TIMEOUT_MS, windowsHide: true })
+    result = spawnSync(command.file, command.args, { stdio: ['ignore', fd, fd], timeout: timeoutMs || ENGINE_TIMEOUT_MS, windowsHide: true })
   } finally {
     try { closeSync(fd) } catch (_) { }
   }
@@ -364,7 +373,7 @@ function spawnCapture(cliPath, args, log, timeoutMs) {
     ok: result && result.status === 0,
     status: result && typeof result.status === 'number' ? result.status : -1,
     stdout: text,
-    stderr: '',
+    stderr: result && result.error ? String(result.error.message) : '',
     log,
     timedOut: !!(result && result.error && String(result.error.code) === 'ETIMEDOUT'),
   }
@@ -384,7 +393,7 @@ function parseJsonText(text) {
 }
 
 function engineError(result, what) {
-  const detail = String(result.stdout || '').trim()
+  const detail = String(result.stdout || result.stderr || '').trim()
   const timedOut = result.timedOut ? '（超时）' : ''
   return new Error(what + '失败' + timedOut + (detail === '' ? '' : ': ' + detail.split('\n').slice(-6).join(' ')))
 }
@@ -566,6 +575,15 @@ const EDIT_COMMANDS = {
   'file.exportInterchange': true,
   'sequence.open': true,
   'sequence.settings': true,
+  'sequence.applyVideoTransition': true,
+  'sequence.setTransition': true,
+  'sequence.removeTransition': true,
+  'captions.newTrack': true,
+  'captions.setStyle': true,
+  'captions.add': true,
+  'captions.setText': true,
+  'captions.setTimes': true,
+  'captions.delete': true,
   'markers.add': true,
   'markers.addRange': true,
   'markers.clearAll': true,
@@ -684,6 +702,10 @@ function normalizeSequence(sequence) {
         enabled: track.enabled !== false,
         muted: track.muted === true,
         locked: track.locked === true,
+        transitions: (track.transitions || []).map((entry) => ({
+          id: entry.id, effect: entry.effect, from: entry.from, to: entry.to,
+          start: ticksToSec(entry.start), dur: ticksToSec(entry.duration), align: entry.align,
+        })),
         clipCount: items.length,
         items: items,
       })
@@ -781,6 +803,16 @@ function projectDetail(config, projectFile, options) {
   if (typeof active === 'number') {
     for (const entry of sequences) if (entry.id === active) entry.active = true
     sequence = normalizeSequence(inspectSequence(config, file))
+    if (sequence) {
+      const result = engineJson(config, ['exec', 'captions.list', '{}'], { project: file, what: '读取字幕', allowFailure: true })
+      sequence.captionTracks = ((result.json && result.json.tracks) || []).map((track) => ({
+        id: track.id, label: track.label, name: track.name, enabled: track.enabled !== false, locked: track.locked === true,
+        style: track.style || {},
+        items: (track.captions || []).map((caption) => ({
+          id: caption.id, text: caption.text || '', start: ticksToSec(caption.start), end: ticksToSec(caption.end),
+        })),
+      }))
+    }
   }
 
   const detail = {
@@ -1033,9 +1065,14 @@ function runSteps(config, projectFile, steps, options) {
     const chunk = steps.slice(index, index + STEP_CHUNK)
     const run = engineRun(config, projectFile, chunk, { timeoutMs: opts.timeoutMs })
     out.ran += chunk.length
+    if (!run.ok && !run.results.some((entry) => entry.ok === false)) out.failed.push({ id: chunk[0].id, error: '引擎未正常完成批处理（退出码 ' + run.status + '）' })
     for (let i = 0; i < run.results.length; i += 1) {
       const result = run.results[i] || {}
       out.results.push(result)
+      const step = chunk[i]
+      if (result.ok === true && step && step.id === 'timeline.trim' && typeof step.params.delta === 'number' && result.result && typeof result.result.delta === 'number' && Math.abs(result.result.delta - step.params.delta) > 1) {
+        out.failed.push({ id: step.id, error: '源素材余量不足，无法按指定帧数裁切或延长' })
+      }
       if (result.ok === false) {
         out.failed.push({
           id: result.id || (chunk[i] ? chunk[i].id : '?'),
@@ -1125,7 +1162,9 @@ function gradeClearClips(config, registry, request) {
     if (clips.indexOf(clip.clip) < 0) continue
     for (let index = clip.effects.length - 1; index >= 0; index -= 1) {
       if (String(clip.effects[index].effect).toLowerCase() !== GRADE_EFFECT) continue
-      steps.push({ id: 'effects.reset', params: { clip: clip.clip, index: index } })
+      // reset restores parameters but leaves the effect attached. Remove only
+      // lumetri, in reverse index order, preserving intrinsic/other effects.
+      steps.push({ id: 'effects.remove', params: { clip: clip.clip, index: index } })
     }
   }
   if (steps.length === 0) return { cleared: 0, detail: detail }
@@ -1138,7 +1177,7 @@ function gradeClearClips(config, registry, request) {
 // agent would, and gets the per-command outcome back rather than a bare ok.
 function projectApply(config, registry, request) {
   const project = resolveProject(registry, request.project)
-  const commands = guardCommands(request.commands)
+  const commands = guardCommands(request.operation ? editWorkflowCommands(config, project.file, request) : request.commands)
   // dry-run answers "what would this do" without touching the file. The engine
   // has no plan mode of its own (every command just runs), so what can be
   // promised honestly is the exact command list plus which of the referenced
@@ -1166,12 +1205,13 @@ function projectApply(config, registry, request) {
     }
   }
   const snapshot = snapshotTake(config, project.file)
+  if (request.operation && !snapshot) throw new Error('无法建立撤销快照，尚未修改工程')
   const run = runSteps(config, project.file, commands)
   // atomic (0.4.0): `run --keep-going` happily leaves a half-applied batch —
   // e.g. the first of two swap moves landed, the second did not. With atomic the
   // project goes back to the snapshot taken above, so a batch is all or nothing.
   let rolledBack = false
-  if (request.atomic === true && run.failed.length > 0 && snapshot) {
+  if ((request.atomic === true || request.operation) && run.failed.length > 0 && snapshot) {
     const undone = snapshotUndo(config, project.file)
     rolledBack = undone.ok === true
     projectInvalidate(project.file)
@@ -1467,6 +1507,121 @@ function projectMerge(config, registry, request) {
     compat: compat,
     detail: projectDetail(config, projectFile, { force: true }),
   }
+}
+
+// ── host/45-workflow.js ──────────────────────────────────────────────
+// Validated editing operations shared by the sidebar and the MCP workflow tool.
+// Build the whole batch before taking a snapshot; invalid input never writes.
+function editTimeTicks(value, fps, label) {
+  if (!(fps > 0)) throw new Error('序列帧率无效')
+  const text = String(value === undefined ? '' : value).trim()
+  let seconds
+  let match
+  if ((match = /^([+-]?\d+)f$/i.exec(text))) seconds = Number(match[1]) / fps
+  else if ((match = /^(\d+):(\d{2}):(\d{2}):(\d{2})$/.exec(text))) {
+    if (Number(match[2]) > 59 || Number(match[3]) > 59 || Number(match[4]) >= Math.round(fps)) throw new Error('时间码超出范围')
+    seconds = (Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])) * Math.round(fps) / fps + Number(match[4]) / fps
+  } else if ((match = /^(\d+):(\d{2}(?:\.\d+)?)$/.exec(text))) {
+    if (Number(match[2]) >= 60) throw new Error('时间秒数须小于 60')
+    seconds = Number(match[1]) * 60 + Number(match[2])
+  } else if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)s?$/i.test(text)) seconds = Number(text.replace(/s$/i, ''))
+  if (!Number.isFinite(seconds)) throw new Error((label || '时间') + '请填写秒、帧（如 12f）或时间码（00:00:01:12）')
+  const ticks = Math.round(Math.round(seconds * fps) * TICKS_PER_SECOND / fps)
+  if (!Number.isSafeInteger(ticks)) throw new Error('时间超出可处理范围')
+  return ticks
+}
+
+function editWorkflowCommands(config, projectFile, request) {
+  const sequence = projectDetail(config, projectFile, { force: true }).sequence
+  if (!sequence) throw new Error('请先打开一个序列')
+  if (request.sequence !== sequence.id) throw new Error('序列已切换，请刷新后重试')
+  const tick = (value, label) => editTimeTicks(value, sequence.fps, label)
+  const clipOf = (id) => {
+    const clip = sequence.clips.find((entry) => entry.clip === id && entry.kind === 'video')
+    if (!clip) throw new Error('镜头已不存在，请刷新后重试')
+    const track = sequence.tracks.video.find((entry) => entry.id === clip.track)
+    if (track.locked) throw new Error('轨道已锁定')
+    return clip
+  }
+  if (request.operation === 'trim') {
+    const clip = clipOf(request.clip)
+    if (request.edge !== 'in' && request.edge !== 'out') throw new Error('请选择裁头或裁尾')
+    const delta = tick(request.delta, '裁切量')
+    if (delta === 0) throw new Error('裁切量不足一帧')
+    if (delta >= clip.ticks.duration) throw new Error('裁切后必须至少保留一帧')
+    return [{ id: 'timeline.trim', params: { clip: clip.clip, edge: request.edge, delta: request.edge === 'out' ? -delta : delta, mode: 'ripple' } }]
+  }
+  if (request.operation === 'split') {
+    const clip = clipOf(request.clip)
+    const time = tick(request.time, '分割位置')
+    if (time <= clip.ticks.start || time >= clip.ticks.start + clip.ticks.duration) throw new Error('分割位置须在镜头内部')
+    return [{ id: 'timeline.razor', params: { clip: clip.clip, time: time } }]
+  }
+  if (request.operation === 'reorder') {
+    const clip = clipOf(request.clip)
+    const target = clipOf(request.target)
+    if (clip.track !== target.track) throw new Error('请拖到同一视频轨的镜头上')
+    const track = sequence.tracks.video.find((entry) => entry.id === clip.track)
+    if ((track.transitions || []).length > 0) throw new Error('请先移除该轨转场，再调整镜头顺序')
+    const sorted = track.items.slice().sort((a, b) => a.start - b.start)
+    const order = sorted.filter((entry) => entry.clip !== clip.clip)
+    const at = order.findIndex((entry) => entry.clip === target.clip)
+    if (at < 0) throw new Error('顺序没有变化')
+    order.splice(at + (request.after === true ? 1 : 0), 0, clip)
+    let cursor = Math.min.apply(null, sorted.map((entry) => entry.ticks.start))
+    const moves = []
+    for (const entry of order) {
+      if (entry.ticks.start !== cursor) moves.push({ clip: entry.clip, track: track.id, time: cursor })
+      cursor += entry.ticks.duration
+    }
+    if (moves.length === 0) throw new Error('顺序没有变化')
+    return [{ id: 'timeline.move', params: { moves: moves, linked: true, insert: false } }]
+  }
+  if (request.operation === 'caption') {
+    const tracks = sequence.captionTracks || []
+    const track = request.track ? tracks.find((entry) => entry.id === request.track) : tracks[0]
+    if (request.track && !track) throw new Error('字幕轨已不存在')
+    if (track && track.locked) throw new Error('字幕轨已锁定')
+    const caption = track && track.items.find((entry) => entry.id === request.caption)
+    if (request.caption && !caption) throw new Error('字幕已不存在，请刷新后重试')
+    if (request.remove === true) {
+      if (!caption) throw new Error('请选择要删除的字幕')
+      return [{ id: 'captions.delete', params: { captions: [caption.id], ripple: false } }]
+    }
+    const text = String(request.text || '').trim()
+    if (!text || text.length > 4000) throw new Error('字幕内容须为 1–4000 个字符')
+    const start = tick(request.start, '字幕起点')
+    const end = tick(request.end, '字幕终点')
+    if (start < 0 || end <= start || end > Math.round(sequence.duration * TICKS_PER_SECOND) + 1) throw new Error('字幕起止时间须位于序列内，且终点晚于起点')
+    const steps = []
+    if (!track) {
+      steps.push({ id: 'captions.newTrack', params: { format: 'Subtitle', name: '字幕', language: 'zh' } })
+      steps.push({ id: 'captions.setStyle', params: { track: 'C1', font: process.platform === 'win32' ? 'Microsoft YaHei' : 'sans-serif', size: Math.max(12, Math.round(sequence.height * 0.05)), background: true } })
+    }
+    if (caption) {
+      steps.push({ id: 'captions.setText', params: { caption: caption.id, text: text } })
+      steps.push({ id: 'captions.setTimes', params: { caption: caption.id, startTime: start, endTime: end } })
+    } else steps.push({ id: 'captions.add', params: { track: track ? track.id : 'C1', text: text, time: start, durationSeconds: (end - start) / TICKS_PER_SECOND } })
+    return steps
+  }
+  if (request.operation === 'transition') {
+    const clip = clipOf(request.clip)
+    const track = sequence.tracks.video.find((entry) => entry.id === clip.track)
+    if (request.remove === true || request.transition) {
+      const transition = (track.transitions || []).find((entry) => entry.id === request.transition && (entry.from === clip.clip || entry.to === clip.clip))
+      if (!transition) throw new Error('转场已不存在，请刷新后重试')
+      if (request.remove === true) return [{ id: 'sequence.removeTransition', params: { transitions: [transition.id] } }]
+      const duration = tick(request.duration, '转场时长')
+      if (duration <= 0 || duration > clip.ticks.duration) throw new Error('转场须至少一帧，且不能长于镜头')
+      return [{ id: 'sequence.setTransition', params: { transition: transition.id, duration: duration } }]
+    }
+    if (request.edge !== 'in' && request.edge !== 'out') throw new Error('请选择镜头开头或结尾')
+    if (!['cross_dissolve', 'dip_to_black'].includes(request.effect)) throw new Error('不支持的转场类型')
+    const duration = tick(request.duration, '转场时长')
+    if (duration <= 0 || duration > clip.ticks.duration) throw new Error('转场须至少一帧，且不能长于镜头')
+    return [{ id: 'sequence.applyVideoTransition', params: { clip: clip.clip, effect: request.effect, edge: request.edge, frames: Math.round(duration / TICKS_PER_SECOND * sequence.fps) } }]
+  }
+  throw new Error('未知的剪辑操作')
 }
 
 // ── host/50-jobs.js ──────────────────────────────────────────────────
@@ -1803,7 +1958,8 @@ function jobStart(config, registry, request) {
 
   let fd = -1
   try { fd = openSync(job.log, 'w') } catch (_) { fd = -1 }
-  const child = spawn(config.cliPath, args, {
+  const command = engineInvocation(config.cliPath, args)
+  const child = spawn(command.file, command.args, {
     stdio: fd >= 0 ? ['ignore', fd, fd] : 'ignore',
     windowsHide: true,
     detached: false,
@@ -1899,7 +2055,8 @@ function runAsync(config, args, label, timeoutMs) {
     try { fd = openSync(log, 'w') } catch (_) { fd = -1 }
     let child
     try {
-      child = spawn(config.cliPath, args, {
+      const command = engineInvocation(config.cliPath, args)
+      child = spawn(command.file, command.args, {
         stdio: fd >= 0 ? ['ignore', fd, fd] : 'ignore',
         windowsHide: true,
       })
@@ -2052,7 +2209,7 @@ function previewResolve(config, name) {
 // loads config and registry fresh, because both can change at runtime (the user
 // moves the workspace, adds a preset) and a cached copy would silently diverge.
 
-const PLUGIN_VERSION = '0.4.0'
+const PLUGIN_VERSION = '0.6.0'
 
 // The report file the *old* pipeline wrote. Kept readable so existing scripts
 // keep working; nothing new is written in this format.
@@ -2937,6 +3094,7 @@ function mcpTimelineView(detail, options) {
         tracks.push({
           track: track.label, id: track.id, kind: kind, muted: track.muted, locked: track.locked, enabled: track.enabled,
           clips: track.items.slice().sort((x, y) => x.start - y.start).map((clip) => mcpClipView(clip, fps)),
+          transitions: track.transitions || [],
         })
       }
     }
@@ -2949,6 +3107,7 @@ function mcpTimelineView(detail, options) {
       markers: sequence.markers,
       trackCount: { video: sequence.tracks.video.length, audio: sequence.tracks.audio.length },
       tracks: tracks,
+      captionTracks: sequence.captionTracks || [],
     }
   }
   if (opts.assets) view.assets = (detail.assets || []).map(mcpAssetView)
@@ -2972,6 +3131,13 @@ function mcpDiff(before, after) {
   if (before) { out.durationBefore = mcpRound(before.duration); for (const clip of before.clips) a.set(clip.clip, clip) }
   if (after) { out.durationAfter = mcpRound(after.duration); for (const clip of after.clips) b.set(clip.clip, clip) }
   const fps = after ? after.fps : (before ? before.fps : 0)
+  const captionsBefore = before ? before.captionTracks || [] : []
+  const captionsAfter = after ? after.captionTracks || [] : []
+  if (JSON.stringify(captionsBefore) !== JSON.stringify(captionsAfter)) out.captions = { before: captionsBefore, after: captionsAfter }
+  const transitions = (sequence) => sequence ? sequence.tracks.video.concat(sequence.tracks.audio).flatMap((track) => (track.transitions || []).map((entry) => Object.assign({ track: track.label }, entry))) : []
+  const transitionsBefore = transitions(before)
+  const transitionsAfter = transitions(after)
+  if (JSON.stringify(transitionsBefore) !== JSON.stringify(transitionsAfter)) out.transitions = { before: transitionsBefore, after: transitionsAfter }
   for (const [id, clip] of b) if (!a.has(id)) out.added.push(mcpClipView(clip, fps))
   for (const [id, clip] of a) if (!b.has(id)) out.removed.push({ clip: id, name: clip.name, track: clip.trackLabel })
   for (const [id, now] of b) {
@@ -3163,6 +3329,7 @@ function mcpMutate(args, label, build) {
   return withProjectLock(config, project.file, 'mcp', () => {
     const planned = plan()
     const snapshot = snapshotTake(config, project.file)
+    if (args.operation && !snapshot) throw new Error('无法建立撤销快照，尚未修改工程')
     const run = runSteps(config, project.file, planned.steps)
     let rolledBack = false
     if (run.failed.length > 0 && args.atomic !== false && snapshot) {
@@ -3380,6 +3547,16 @@ mcpTool('filmcraft_preview_clip', '预览短片',
   })
 
 // ── editing ─────────────────────────────────────────────────────────────────
+mcpTool('filmcraft_edit_timeline', '精剪、字幕与转场',
+  '与面板共用的剪辑操作。operation: trim（clip/edge/delta）、split（clip/time，序列绝对时间）、reorder（clip/target/after，同轨插入排序）、caption（track可省略、caption修改时填写、text/start/end，remove删除）、transition（clip/effect/edge/duration，transition修改时填写，remove删除）。时间接受秒/帧/时间码。sequence 必须是当前序列 id。字幕使用序列绝对时间，排序后需复核。',
+  { project: T_PROJECT, sequence: { type: 'number' }, operation: { type: 'string', enum: ['trim', 'split', 'reorder', 'caption', 'transition'] },
+    clip: { type: 'number' }, target: { type: 'number' }, after: { type: 'boolean' }, edge: { type: 'string', enum: ['in', 'out'] }, delta: T_TIME, time: T_TIME,
+    track: { type: 'number' }, caption: { type: 'number' }, text: { type: 'string' }, start: T_TIME, end: T_TIME, remove: { type: 'boolean' },
+    effect: { type: 'string', enum: ['cross_dissolve', 'dip_to_black'] }, duration: T_TIME, transition: { type: 'number' }, dry_run: T_DRY },
+  ['project', 'sequence', 'operation'], EDIT, (args) => mcpMutate(args, args.operation, (sequence, detail) => {
+    return editWorkflowCommands(mcpConfig(), detail.path, args)
+  }))
+
 mcpTool('filmcraft_trim', '裁剪片段',
   '修剪片段入点或出点。delta 为正 = 片段变短（裁掉），为负 = 变长（需要源素材有余量）。默认 ripple：后面的片段跟着移动，不留空隙。时间自动对齐到帧。',
   { project: T_PROJECT, clip: { type: 'number' }, edge: { type: 'string', enum: ['in', 'out'] }, delta: T_TIME, mode: { type: 'string', description: '默认 ripple（已验证）。其他模式值请先用 filmcraft_describe_commands 查 timeline.trim' }, dry_run: T_DRY, atomic: T_ATOMIC },
@@ -3390,7 +3567,7 @@ mcpTool('filmcraft_trim', '裁剪片段',
     const ticks = mcpToTicks(delta, sequence.fps)
     if (ticks === 0) throw new Error('delta 不足一帧，未做任何修改')
     if (delta >= clip.dur - (sequence.fps > 0 ? 0.5 / sequence.fps : 0)) throw new Error('裁掉 ' + delta + 's 会让片段 ' + clip.clip + '（' + mcpRound(clip.dur) + 's）消失；要删除请用 filmcraft_delete_clips')
-    return [{ id: 'timeline.trim', params: { clip: clip.clip, edge: args.edge, mode: args.mode || 'ripple', delta: ticks } }]
+    return [{ id: 'timeline.trim', params: { clip: clip.clip, edge: args.edge, mode: args.mode || 'ripple', delta: args.edge === 'out' ? -ticks : ticks } }]
   }))
 
 mcpTool('filmcraft_move_clips', '移动片段',

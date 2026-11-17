@@ -74,6 +74,7 @@ const COMMANDS = {
   },
   'timeline.trim': (p) => {
     const s = seq(); const { c, t } = find(s, p.clip)
+    p = { ...p, delta: p.edge === 'out' ? -p.delta : p.delta }
     if (p.mode !== 'ripple') throw new Error('mock only supports ripple')
     if (p.delta >= c.duration) throw new Error('trim would remove clip')
     for (const x of [{ c, t }, ...partners(s, c)]) {
@@ -84,6 +85,32 @@ const COMMANDS = {
     }
     return {}
   },
+  'captions.list': () => ({ tracks: seq().captionTracks || [] }),
+  'captions.newTrack': (p) => {
+    const s = seq(); s.captionTracks ||= []
+    const track = P.nextId++
+    s.captionTracks.push({ id: track, label: 'C' + (s.captionTracks.length + 1), name: p.name, enabled: true, locked: false, captions: [], style: {} })
+    return { track }
+  },
+  'captions.setStyle': (p) => { Object.assign(captionTrack(p.track).style, p); return {} },
+  'captions.add': (p) => {
+    const caption = P.nextId++
+    captionTrack(p.track).captions.push({ id: caption, text: p.text, start: p.time || 0, end: (p.time || 0) + Math.round(p.durationSeconds * TPS) })
+    return { caption }
+  },
+  'captions.setText': (p) => { captionById(p.caption).text = p.text; return {} },
+  'captions.setTimes': (p) => { Object.assign(captionById(p.caption), { start: p.startTime, end: p.endTime }); return {} },
+  'captions.delete': (p) => { for (const track of seq().captionTracks) track.captions = track.captions.filter((entry) => !p.captions.includes(entry.id)); return {} },
+  'sequence.applyVideoTransition': (p) => {
+    const { c, t } = find(seq(), p.clip)
+    const duration = Math.round(p.frames * TPS / seq().settings.fps)
+    t.transitions ||= []
+    const transition = P.nextId++
+    t.transitions.push({ id: transition, effect: p.effect, from: p.edge === 'out' ? c.clip : null, to: p.edge === 'in' ? c.clip : null, start: p.edge === 'in' ? c.start : c.start + c.duration - duration, duration, align: p.edge === 'in' ? 'start' : 'end' })
+    return { transition }
+  },
+  'sequence.setTransition': (p) => { for (const t of seq().video) for (const entry of t.transitions || []) if (entry.id === p.transition) entry.duration = p.duration; return {} },
+  'sequence.removeTransition': (p) => { for (const t of seq().video) t.transitions = (t.transitions || []).filter((entry) => !p.transitions.includes(entry.id)); return {} },
   'timeline.move': (p) => {
     const s = seq()
     const plan = p.moves.map((m) => { const hit = find(s, m.clip); return { hit, delta: m.time - hit.c.start, track: m.track } })
@@ -114,7 +141,8 @@ const COMMANDS = {
     fx.params[p.param] = { value: typeof p.value === 'boolean' ? 'Bool(' + p.value + ')' : 'Float(' + Number(p.value).toFixed(1) + ')', keyframes: 0 }
     return {}
   },
-  'effects.reset': (p) => { const { c } = find(seq(), p.clip); c.effects.splice(p.index, 1); return {} },
+  'effects.reset': (p) => { const { c } = find(seq(), p.clip); c.effects[p.index].params = {}; return {} },
+  'effects.remove': (p) => { const { c } = find(seq(), p.clip); c.effects.splice(p.index, 1); return {} },
   'timeline.razor': (p) => {
     const s = seq(); const { c, t } = find(s, p.clip)
     const cut = p.time - c.start
@@ -124,6 +152,18 @@ const COMMANDS = {
     return { clips: [c.clip, right.clip] }
   },
   'file.exportInterchange': (p) => { writeFileSync(p.path, 'TITLE: mock ' + p.format + '\n'); return { path: p.path } },
+}
+
+function captionTrack(ref) {
+  const tracks = seq().captionTracks || []
+  const track = tracks.find((entry) => entry.id === ref || entry.label === ref)
+  if (!track) throw new Error('unknown caption track')
+  return track
+}
+function captionById(id) {
+  const caption = (seq().captionTracks || []).flatMap((track) => track.captions).find((entry) => entry.id === id)
+  if (!caption) throw new Error('unknown caption')
+  return caption
 }
 
 function inspectSequence() {

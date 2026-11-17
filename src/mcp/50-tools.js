@@ -89,6 +89,7 @@ function mcpMutate(args, label, build) {
   return withProjectLock(config, project.file, 'mcp', () => {
     const planned = plan()
     const snapshot = snapshotTake(config, project.file)
+    if (args.operation && !snapshot) throw new Error('无法建立撤销快照，尚未修改工程')
     const run = runSteps(config, project.file, planned.steps)
     let rolledBack = false
     if (run.failed.length > 0 && args.atomic !== false && snapshot) {
@@ -306,6 +307,16 @@ mcpTool('filmcraft_preview_clip', '预览短片',
   })
 
 // ── editing ─────────────────────────────────────────────────────────────────
+mcpTool('filmcraft_edit_timeline', '精剪、字幕与转场',
+  '与面板共用的剪辑操作。operation: trim（clip/edge/delta）、split（clip/time，序列绝对时间）、reorder（clip/target/after，同轨插入排序）、caption（track可省略、caption修改时填写、text/start/end，remove删除）、transition（clip/effect/edge/duration，transition修改时填写，remove删除）。时间接受秒/帧/时间码。sequence 必须是当前序列 id。字幕使用序列绝对时间，排序后需复核。',
+  { project: T_PROJECT, sequence: { type: 'number' }, operation: { type: 'string', enum: ['trim', 'split', 'reorder', 'caption', 'transition'] },
+    clip: { type: 'number' }, target: { type: 'number' }, after: { type: 'boolean' }, edge: { type: 'string', enum: ['in', 'out'] }, delta: T_TIME, time: T_TIME,
+    track: { type: 'number' }, caption: { type: 'number' }, text: { type: 'string' }, start: T_TIME, end: T_TIME, remove: { type: 'boolean' },
+    effect: { type: 'string', enum: ['cross_dissolve', 'dip_to_black'] }, duration: T_TIME, transition: { type: 'number' }, dry_run: T_DRY },
+  ['project', 'sequence', 'operation'], EDIT, (args) => mcpMutate(args, args.operation, (sequence, detail) => {
+    return editWorkflowCommands(mcpConfig(), detail.path, args)
+  }))
+
 mcpTool('filmcraft_trim', '裁剪片段',
   '修剪片段入点或出点。delta 为正 = 片段变短（裁掉），为负 = 变长（需要源素材有余量）。默认 ripple：后面的片段跟着移动，不留空隙。时间自动对齐到帧。',
   { project: T_PROJECT, clip: { type: 'number' }, edge: { type: 'string', enum: ['in', 'out'] }, delta: T_TIME, mode: { type: 'string', description: '默认 ripple（已验证）。其他模式值请先用 filmcraft_describe_commands 查 timeline.trim' }, dry_run: T_DRY, atomic: T_ATOMIC },
@@ -316,7 +327,7 @@ mcpTool('filmcraft_trim', '裁剪片段',
     const ticks = mcpToTicks(delta, sequence.fps)
     if (ticks === 0) throw new Error('delta 不足一帧，未做任何修改')
     if (delta >= clip.dur - (sequence.fps > 0 ? 0.5 / sequence.fps : 0)) throw new Error('裁掉 ' + delta + 's 会让片段 ' + clip.clip + '（' + mcpRound(clip.dur) + 's）消失；要删除请用 filmcraft_delete_clips')
-    return [{ id: 'timeline.trim', params: { clip: clip.clip, edge: args.edge, mode: args.mode || 'ripple', delta: ticks } }]
+    return [{ id: 'timeline.trim', params: { clip: clip.clip, edge: args.edge, mode: args.mode || 'ripple', delta: args.edge === 'out' ? -ticks : ticks } }]
   }))
 
 mcpTool('filmcraft_move_clips', '移动片段',

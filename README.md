@@ -1,5 +1,32 @@
 # dsh-filmcraft-progress
 
+## 0.6.0 本地开发版：精剪、字幕和转场
+
+- **拖拽排序**：拖动视频时间线或片段列表中的镜头，在目标镜头前/后插入；同轨按时长首尾相接，关联音频一起移动。上下移动按钮继续保留。
+- **精确裁切**：±1f / ±5f，或输入秒数、帧数、非丢帧时间码；预览播放头逐帧步进，可在播放头处分割。正数裁短、负数延长。修复旧版裁尾方向错误；源素材余量不足时整步回滚。
+- **中文字幕**：从播放头新建、多行文本、编辑起止时间、点击定位、删除和撤销；字幕显示在 C 轨并渲染进成片。
+- **视频转场**：交叉溶解、淡入淡出黑场；支持开头/结尾、精确时长、更新和移除，时间线上显示紫色转场条。
+- **AI 同步支持**：新增 `filmcraft_edit_timeline` 工具，与面板共用校验、工程锁和回滚；`filmcraft_get_timeline` 返回字幕与转场。
+
+![0.6.0 精剪界面](docs/images/editing-0.6.0.png)
+
+`npm run build` → `npm test` → `npm run test:real`。本机真实引擎检查共 **81 项通过**（49 项 MCP + 32 项宿主剪辑），另有 7 项布局/时间解析测试、面板交互及模拟引擎检查。见 [0.6.0 验收说明](docs/validation-0.6.0.md)。
+
+这一版仍是本地开发版，未替换 DSH 中安装的插件。拖拽限同轨排序；有转场的轨道须先移除转场再排序；字幕按序列绝对时间保存，修改镜头后请复核。字幕为手动输入，尚无语音识别或 SRT 导入界面。
+
+## 0.5.0 本地开发版
+
+- 剪辑页新增可点击的音视频时间线：片段按时长显示，支持关联音频选中视频、轨内空隙和重叠提示。
+- 修复“清空调色”只重置参数、仍留下调色效果的问题；清空时保留其他效果。
+- 修复 Windows 无法直接启动 Node 脚本形式 CLI 的问题，同步支持预览和后台导出。
+- 已在 Windows + FilmCraft CLI 0.7.2 上通过 **45 项真实引擎检查**，包含导出 MP4 解码、时长和音轨检查。
+
+![0.5.0 面板预览](docs/images/panel-0.5.0.png)
+
+开发验证：`npm run build` → `npm test`；安装了 FilmCraft 的机器再运行 `npm run test:real`。
+真实验证会自动生成三段带音频的测试视频，在独立临时工作区中剪辑，结束后清理。
+CLI 不在默认安装路径时设置 `FILMCRAFT_CLI`。完整记录见 [2026-11-17 验收说明](docs/validation-2026-11-17.md)。
+
 > A generic [DeepSeek Harness](https://github.com/anywhere-labs/deepseek-harness-desktop) plugin for
 > **FilmCraft video editing** — many projects, many sequences, per-clip processing, and merging
 > several videos into one timeline, all from a docked sidebar tab.

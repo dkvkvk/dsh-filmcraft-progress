@@ -107,18 +107,20 @@ const WORKSPACE = {
 const CLIP_A = {
   clip: 69, item: 22, name: 'DJI_20261013121257_0332_D.MP4', track: 'V1', trackLabel: 'V1', kind: 'video',
   start: 0, dur: 9.45945, end: 9.45945, sourceIn: 0, sourceOut: 9.45945, speed: 1, enabled: true,
-  gainDb: 0, link: null, effects: [],
+  gainDb: 0, link: 100, effects: [],
 }
 const CLIP_B = {
   clip: 70, item: 23, name: 'DJI_20261013121345_0333_D.MP4', track: 'V1', trackLabel: 'V1', kind: 'video',
   start: 9.45945, dur: 1.802, end: 11.26145, sourceIn: 0, sourceOut: 1.802, speed: 1, enabled: true,
-  gainDb: 0, link: null, effects: [{ effect: 'lumetri', enabled: true, params: { contrast: 27 } }],
+  gainDb: 0, link: 101, effects: [{ effect: 'lumetri', enabled: true, params: { contrast: 27 } }],
 }
+const AUDIO_A = { ...CLIP_A, clip: 169, track: 'A1', trackLabel: 'A1', kind: 'audio', effects: [] }
+const AUDIO_B = { ...CLIP_B, clip: 170, track: 'A1', trackLabel: 'A1', kind: 'audio', effects: [] }
 const SEQUENCE = {
   id: 9, name: '序列 1', duration: 11.26145, frames: 675, width: 3840, height: 2880, fps: 59.94,
   preset: '', sampleRate: 48000, playhead: 0, inPoint: 0, outPoint: 0, markers: 0,
-  tracks: { video: [{ id: 'V1', label: 'V1', kind: 'video', enabled: true, muted: false, locked: false, clipCount: 2, items: [CLIP_A, CLIP_B] }], audio: [] },
-  clips: [CLIP_A, CLIP_B],
+  tracks: { video: [{ id: 'V1', label: 'V1', kind: 'video', enabled: true, muted: false, locked: false, clipCount: 2, items: [CLIP_A, CLIP_B] }], audio: [{ id: 'A1', label: 'A1', kind: 'audio', muted: false, items: [AUDIO_A, AUDIO_B] }] },
+  clips: [CLIP_A, CLIP_B, AUDIO_A, AUDIO_B],
 }
 function detail() {
   return {
@@ -161,7 +163,11 @@ globalThis.fetch = async (path, init) => {
   else if (path.indexOf('/api/project') >= 0) value = detail()
   else if (path.indexOf('/api/jobs') >= 0) value = { ok: true, jobs: [RUNNING_JOB], calibration: [] }
   else if (path.indexOf('/api/state') >= 0) value = { ok: true, present: false, state: null }
-  else if (path.indexOf('/api/edit') >= 0) value = { ok: true, ran: 1, failed: [], snapshot: 'x', detail: detail() }
+  else if (path.indexOf('/api/edit') >= 0) {
+    if (body.operation === 'caption') SEQUENCE.captionTracks = [{ id: 301, label: 'C1', items: [{ id: 302, text: body.text, start: 0, end: 3 }] }]
+    if (body.operation === 'transition') SEQUENCE.tracks.video[0].transitions = [{ id: 401, from: 69, to: 70, start: 9.3, dur: 0.2, effect: body.effect }]
+    value = { ok: true, ran: 1, failed: [], snapshot: 'x', detail: detail() }
+  }
   else if (path.indexOf('/api/grade') >= 0) value = { ok: true, applied: 1, failed: [], detail: detail() }
   else if (path.indexOf('/api/undo') >= 0) value = Object.assign({ ok: true, detail: detail() })
   else if (path.indexOf('/api/export') >= 0) value = { ok: true, job: RUNNING_JOB }
@@ -350,6 +356,23 @@ console.log('\n── 打开工程 ──')
   check(findNodes(tree, 'fc-prev-i').length === 1, '画面 <img> 已渲染')
 }
 
+console.log('\n── 音视频时间线 ──')
+{
+  check(findNodes(tree, 'fc-tl-row').length === 2, '视频、音频各显示一条轨道')
+  const blocks = findNodes(tree, 'fc-tl-clip')
+  check(blocks.length === 4, '音视频片段全部可见')
+  check(Math.abs(parseFloat(blocks[0].props.style.width) - CLIP_A.dur / SEQUENCE.duration * 100) < 0.001, '片段宽度与时长成比例')
+  const before = frameCalls.length
+  blocks.find((node) => node.props.key === 'clip-170').props.onClick()
+  await sleep(80)
+  tree = paint('选中音频对应的视频')
+  check(findNodes(tree, 'fc-tl-clip').find((node) => node.props.key === 'clip-70').props['aria-pressed'] === true, '点击关联音频会选中对应视频')
+  check(frameCalls.length > before && frameCalls.at(-1).seconds === CLIP_B.start, '预览切到选中镜头的起点')
+  findNodes(tree, 'fc-tl-clip').find((node) => node.props.key === 'clip-69').props.onClick()
+  await sleep(80)
+  tree = paint('回到第一个镜头')
+}
+
 console.log('\n── 裁头 ──')
 {
   const before = calls.length
@@ -358,10 +381,47 @@ console.log('\n── 裁头 ──')
   tree = attempt('重渲染', () => paint('裁头后'))
   const edit = calls.slice(before).filter((call) => call.path.indexOf('/api/edit') >= 0)[0]
   check(!!edit, '发出了 edit.write 请求')
-  const command = edit && edit.body && edit.body.commands ? edit.body.commands[0] : null
-  check(!!command && command.id === 'timeline.trim', '命令是 timeline.trim（' + (command && command.id) + '）')
-  check(!!command && command.params.clip === 69, '命令带上了选中片段')
-  check(!!command && command.params.delta === Math.round(0.5 * 254016000000), 'delta 换算成 tick')
+  check(edit.body.operation === 'trim' && edit.body.clip === 69, '裁切带上了选中片段')
+  check(edit.body.delta === 0.5 && edit.body.sequence === 9 && edit.body.atomic === true, '裁切量由宿主对齐到帧，整步可回滚')
+}
+
+console.log('\n── 拖拽、逐帧、字幕和转场 ──')
+{
+  const blocks = findNodes(tree, 'fc-tl-clip').filter((node) => node.props.draggable)
+  check(blocks.length === 2, '视频时间线支持拖拽')
+  const target = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 30 }), classList: { remove() {}, toggle() {} } }
+  blocks[1].props.onDragStart({ dataTransfer: { setData() {} } })
+  blocks[0].props.onDrop({ preventDefault() {}, currentTarget: target, clientX: 1 })
+  await sleep(80); tree = paint('拖拽后')
+  const drag = calls.filter((call) => call.body && call.body.operation === 'reorder').at(-1)
+  check(drag && drag.body.clip === 70 && drag.body.target === 69 && drag.body.after === false, '拖到镜头左侧发送插入排序')
+  const rows = findNodes(tree, 'fc-clip').filter((node) => node.props.draggable)
+  check(rows.length === 2, '片段列表同样支持拖拽')
+  findClickable(tree, '+1f')[0].props.onClick()
+  await sleep(80); tree = paint('逐帧裁切')
+  const trim = calls.filter((call) => call.body && call.body.operation === 'trim').at(-1)
+  check(trim.body.delta === '1f', '逐帧按钮保持精确帧数')
+  const range = findNodes(tree, 'fc-range')[0]
+  check(Math.abs(range.props.step - 1 / 59.94) < 1e-9, '播放头以序列帧率步进')
+  range.props.onChange({ target: { value: 0.5 } })
+  await sleep(40); tree = paint('移动播放头')
+  findClickable(tree, '在此分割')[0].props.onClick()
+  await sleep(80); tree = paint('分割')
+  const split = calls.filter((call) => call.body && call.body.operation === 'split').at(-1)
+  check(split.body.time > 0 && split.body.clip === 69, '分割使用当前镜头和播放头')
+  const textarea = findNodes(tree, 'fc-caption-text')[0]
+  textarea.props.onChange({ target: { value: '中文字幕\n第二行' } })
+  tree = paint('输入字幕')
+  findClickable(tree, '添加字幕')[0].props.onClick()
+  await sleep(80); tree = paint('字幕保存')
+  const caption = calls.filter((call) => call.body && call.body.operation === 'caption').at(-1)
+  check(caption.body.text === '中文字幕\n第二行' && caption.body.start === '0' && caption.body.end === '3', '字幕保存文字与起止时间')
+  check(findNodes(tree, 'fc-caption-row').length === 1 && findNodes(tree, 'fc-tl-clip').some((node) => /caption/.test(node.props.className)), '字幕出现在列表和时间线')
+  findClickable(tree, '添加转场')[0].props.onClick()
+  await sleep(80); tree = paint('转场保存')
+  const transition = calls.filter((call) => call.body && call.body.operation === 'transition').at(-1)
+  check(transition.body.effect === 'cross_dissolve' && transition.body.duration === '12f', '转场发送类型和精确时长')
+  check(findNodes(tree, 'fc-tl-transition').length === 1 && findClickable(tree, '更新时长').length === 1, '转场可见且可修改')
 }
 
 console.log('\n── 预览片段 ──')

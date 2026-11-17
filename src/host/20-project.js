@@ -98,6 +98,10 @@ function normalizeSequence(sequence) {
         enabled: track.enabled !== false,
         muted: track.muted === true,
         locked: track.locked === true,
+        transitions: (track.transitions || []).map((entry) => ({
+          id: entry.id, effect: entry.effect, from: entry.from, to: entry.to,
+          start: ticksToSec(entry.start), dur: ticksToSec(entry.duration), align: entry.align,
+        })),
         clipCount: items.length,
         items: items,
       })
@@ -195,6 +199,16 @@ function projectDetail(config, projectFile, options) {
   if (typeof active === 'number') {
     for (const entry of sequences) if (entry.id === active) entry.active = true
     sequence = normalizeSequence(inspectSequence(config, file))
+    if (sequence) {
+      const result = engineJson(config, ['exec', 'captions.list', '{}'], { project: file, what: '读取字幕', allowFailure: true })
+      sequence.captionTracks = ((result.json && result.json.tracks) || []).map((track) => ({
+        id: track.id, label: track.label, name: track.name, enabled: track.enabled !== false, locked: track.locked === true,
+        style: track.style || {},
+        items: (track.captions || []).map((caption) => ({
+          id: caption.id, text: caption.text || '', start: ticksToSec(caption.start), end: ticksToSec(caption.end),
+        })),
+      }))
+    }
   }
 
   const detail = {

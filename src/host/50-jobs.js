@@ -331,7 +331,8 @@ function jobStart(config, registry, request) {
 
   let fd = -1
   try { fd = openSync(job.log, 'w') } catch (_) { fd = -1 }
-  const child = spawn(config.cliPath, args, {
+  const command = engineInvocation(config.cliPath, args)
+  const child = spawn(command.file, command.args, {
     stdio: fd >= 0 ? ['ignore', fd, fd] : 'ignore',
     windowsHide: true,
     detached: false,

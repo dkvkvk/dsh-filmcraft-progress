@@ -3,7 +3,7 @@
 // loads config and registry fresh, because both can change at runtime (the user
 // moves the workspace, adds a preset) and a cached copy would silently diverge.
 
-const PLUGIN_VERSION = '0.4.0'
+const PLUGIN_VERSION = '0.6.0'
 
 // The report file the *old* pipeline wrote. Kept readable so existing scripts
 // keep working; nothing new is written in this format.

@@ -41,6 +41,7 @@ function mcpTimelineView(detail, options) {
         tracks.push({
           track: track.label, id: track.id, kind: kind, muted: track.muted, locked: track.locked, enabled: track.enabled,
           clips: track.items.slice().sort((x, y) => x.start - y.start).map((clip) => mcpClipView(clip, fps)),
+          transitions: track.transitions || [],
         })
       }
     }
@@ -53,6 +54,7 @@ function mcpTimelineView(detail, options) {
       markers: sequence.markers,
       trackCount: { video: sequence.tracks.video.length, audio: sequence.tracks.audio.length },
       tracks: tracks,
+      captionTracks: sequence.captionTracks || [],
     }
   }
   if (opts.assets) view.assets = (detail.assets || []).map(mcpAssetView)
@@ -76,6 +78,13 @@ function mcpDiff(before, after) {
   if (before) { out.durationBefore = mcpRound(before.duration); for (const clip of before.clips) a.set(clip.clip, clip) }
   if (after) { out.durationAfter = mcpRound(after.duration); for (const clip of after.clips) b.set(clip.clip, clip) }
   const fps = after ? after.fps : (before ? before.fps : 0)
+  const captionsBefore = before ? before.captionTracks || [] : []
+  const captionsAfter = after ? after.captionTracks || [] : []
+  if (JSON.stringify(captionsBefore) !== JSON.stringify(captionsAfter)) out.captions = { before: captionsBefore, after: captionsAfter }
+  const transitions = (sequence) => sequence ? sequence.tracks.video.concat(sequence.tracks.audio).flatMap((track) => (track.transitions || []).map((entry) => Object.assign({ track: track.label }, entry))) : []
+  const transitionsBefore = transitions(before)
+  const transitionsAfter = transitions(after)
+  if (JSON.stringify(transitionsBefore) !== JSON.stringify(transitionsAfter)) out.transitions = { before: transitionsBefore, after: transitionsAfter }
   for (const [id, clip] of b) if (!a.has(id)) out.added.push(mcpClipView(clip, fps))
   for (const [id, clip] of a) if (!b.has(id)) out.removed.push({ clip: id, name: clip.name, track: clip.trackLabel })
   for (const [id, now] of b) {

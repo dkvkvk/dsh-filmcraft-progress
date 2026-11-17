@@ -32,12 +32,13 @@ if (!existsSync(html)) {
 
 mkdirSync('preview', { recursive: true })
 const out = resolve('preview/panel.png')
+const editingFocus = process.argv.includes('--editing')
 const args = [
   '--headless=new',
   '--disable-gpu',
   '--hide-scrollbars',
   '--force-device-scale-factor=1',
-  '--window-size=1880,1250',
+  editingFocus ? '--window-size=1480,590' : '--window-size=1880,1250',
   '--screenshot=' + out,
   'file:///' + html.replace(/\\/g, '/'),
 ]
@@ -46,4 +47,4 @@ if (result.status !== 0) {
   console.error('浏览器截图失败，退出码 ' + result.status)
   process.exit(result.status === null ? 1 : result.status)
 }
-console.log('截图写到 preview/panel.png（五页并排，每页 344px 宽）')
+console.log('截图写到 preview/panel.png（每栏 344px 宽）')
