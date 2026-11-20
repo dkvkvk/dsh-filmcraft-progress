@@ -17,18 +17,27 @@ function fcTc(seconds) {
   return fcPad(Math.floor(frames / nominal / 3600)) + ':' + fcPad(mm) + ':' + fcPad(ss) + ':' + fcPad(ff)
 }
 
+const FC_EDIT_BODY_LIMIT = 4e6
+
 async function fcWorkflow(options, label) {
-  if (store.busy || !fcSequence()) return null
-  const result = await fcRun(label, function () {
-    return host.call('edit.write', Object.assign({ project: fcProjectRef(), sequence: fcSequence().id, atomic: true }, options))
+  const target = fcSequence()
+  if (store.busy || !target) return null
+  const project = fcProjectRef()
+  const stillActive = function () { return fcProjectRef() === project && fcSequence()?.id === target.id }
+  const result = await fcRun(label, async function () {
+    const input = typeof options === 'function' ? await options() : options
+    if (!stillActive()) throw new Error('序列已切换，请重新操作')
+    const body = Object.assign({ project: project, sequence: target.id, atomic: true }, input)
+    if (input.operation === 'captionImport' && JSON.stringify(body).length > FC_EDIT_BODY_LIMIT) throw new Error('SRT 文件超出单次导入的大小上限')
+    return host.call('edit.write', body)
   })
   if (!result) return null
-  if (result.detail) fcSetDetail(result.detail, { keep: true })
+  if (result.detail && stillActive()) fcSetDetail(result.detail, { keep: true })
   if (result.ok === false || (result.failed && result.failed.length)) {
     fcFail(label + '失败' + (result.rolledBack ? '，已恢复修改前的工程' : '') + '：' + ((result.failed && result.failed[0] && result.failed[0].error) || '请重试'))
     return null
   }
-  fcNotice(label + '完成')
+  fcNotice(result.imported ? '已导入 ' + result.imported + ' 条字幕' : label + '完成')
   return result
 }
 
@@ -106,6 +115,17 @@ async function fcCaptionSave() {
   const draft = store.captionDraft
   const result = await fcWorkflow({ operation: 'caption', caption: draft.id, track: draft.track, text: draft.text, start: draft.start, end: draft.end }, draft.id ? '修改字幕' : '添加字幕')
   if (result) fcCaptionNew()
+}
+function fcCaptionImport(file) {
+  return fcWorkflow(async function () {
+    if (!/\.srt$/i.test(file.name)) throw new Error('请选择 .srt 字幕文件')
+    // UTF-8 uses at most three bytes per UTF-16 code unit, plus the optional BOM.
+    if (file.size > 3 * FC_EDIT_BODY_LIMIT + 3) throw new Error('SRT 文件超出单次导入的大小上限')
+    const bytes = await file.arrayBuffer()
+    let srt
+    try { srt = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch (_) { throw new Error('文件不是有效的 UTF-8，请另存为 UTF-8 后重试') }
+    return { operation: 'captionImport', srt: srt }
+  }, '导入 SRT')
 }
 function fcCaptionDelete(track, caption) {
   return fcWorkflow({ operation: 'caption', track: track.id, caption: caption.id, remove: true }, '删除字幕').then(function (result) {

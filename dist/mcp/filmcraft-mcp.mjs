@@ -440,15 +440,18 @@ function engineRun(config, projectFile, steps, options) {
   writeFileSync(scriptFile, lines.join('\n') + '\n', 'utf8')
   const args = ['run', scriptFile, '--save', '--compact']
   if (opts.keepGoing !== false) args.push('--keep-going')
-  const result = engineJson(config, args, {
-    project: projectFile,
-    label: 'run-' + steps[0].id.replace(/[^a-z0-9]+/gi, '-'),
-    what: '批处理',
-    timeoutMs: opts.timeoutMs || ENGINE_TIMEOUT_LONG_MS,
-    allowFailure: true,
-  })
-  try { unlinkSync(scriptFile) } catch (_) { }
-  return { results: collectResults(result.json, result.text), raw: result.json, ok: result.ok, status: result.status }
+  try {
+    const result = engineJson(config, args, {
+      project: projectFile,
+      label: 'run-' + steps[0].id.replace(/[^a-z0-9]+/gi, '-'),
+      what: '批处理',
+      timeoutMs: opts.timeoutMs || ENGINE_TIMEOUT_LONG_MS,
+      allowFailure: true,
+    })
+    return { results: collectResults(result.json, result.text), raw: result.json, ok: result.ok, status: result.status }
+  } finally {
+    try { unlinkSync(scriptFile) } catch (_) { }
+  }
 }
 
 // `run --compact` emits one JSON object per line; a single command emits one
@@ -506,9 +509,13 @@ function probeMedia(config, file) {
 // first; undo restores the newest copy. 20 deep is enough for a hand-cut session
 // and small because .fcproj holds references, not media.
 const SNAPSHOT_KEEP = 20
+function snapshotFolder(config, projectFile) {
+  const projectKey = lockKey(uniqSlashes(projectFile).toLowerCase())
+  return joinPath(pathsOf(config.root).snapshots, '.by-project', projectKey)
+}
+
 function snapshotTake(config, projectFile) {
-  const paths = pathsOf(config.root)
-  const folder = joinPath(paths.snapshots, String(stemOf(projectFile)).replace(/[^A-Za-z0-9_.-]+/g, '_'))
+  const folder = snapshotFolder(config, projectFile)
   ensureDir(folder)
   const name = new Date().toISOString().replace(/[:.]/g, '-') + '-' + Math.floor(Math.random() * 1000) + '.fcproj'
   const target = joinPath(folder, name)
@@ -521,19 +528,20 @@ function snapshotTake(config, projectFile) {
   return target
 }
 function snapshotNewest(config, projectFile) {
-  const paths = pathsOf(config.root)
-  const folder = joinPath(paths.snapshots, String(stemOf(projectFile)).replace(/[^A-Za-z0-9_.-]+/g, '_'))
-  const files = listDir(folder).filter((entry) => entry.isFile()).map((entry) => entry.name).sort()
-  if (files.length === 0) return null
-  return joinPath(folder, files[files.length - 1])
+  const legacyFolder = joinPath(pathsOf(config.root).snapshots, stemOf(projectFile).replace(/[^A-Za-z0-9_.-]+/g, '_'))
+  // Look up old snapshots after the per-project history has been exhausted.
+  for (const folder of [snapshotFolder(config, projectFile), legacyFolder]) {
+    const files = listDir(folder).filter((entry) => entry.isFile()).map((entry) => entry.name).sort()
+    if (files.length > 0) return joinPath(folder, files[files.length - 1])
+  }
+  return null
 }
-function snapshotUndo(config, projectFile) {
-  const newest = snapshotNewest(config, projectFile)
-  if (!newest) return { ok: false, error: '没有可撤销的快照' }
-  copyFileSync(newest, projectFile)
-  try { unlinkSync(newest) } catch (_) { }
-  const remaining = listDir(dirOf(newest)).filter((entry) => entry.isFile()).length
-  return { ok: true, restored: baseOf(newest), remaining }
+function snapshotUndo(config, projectFile, snapshot = snapshotNewest(config, projectFile)) {
+  if (!snapshot) return { ok: false, error: '没有可撤销的快照' }
+  copyFileSync(snapshot, projectFile)
+  try { unlinkSync(snapshot) } catch (_) { }
+  const remaining = listDir(dirOf(snapshot)).filter((entry) => entry.isFile()).length
+  return { ok: true, restored: baseOf(snapshot), remaining }
 }
 
 // ── command whitelist ───────────────────────────────────────────────────────
@@ -589,9 +597,9 @@ const EDIT_COMMANDS = {
   'markers.clearAll': true,
   'project.delete': true,
 }
-function guardCommands(commands) {
+function guardCommands(commands, limit = 400) {
   if (!Array.isArray(commands) || commands.length === 0) throw new Error('commands 不能为空')
-  if (commands.length > 400) throw new Error('一次最多 400 条命令')
+  if (commands.length > limit) throw new Error('一次最多 ' + limit + ' 条命令')
   return commands.map((command) => {
     const id = command && command.id
     if (typeof id !== 'string' || EDIT_COMMANDS[id] !== true) {
@@ -1063,7 +1071,7 @@ function runSteps(config, projectFile, steps, options) {
   const out = { ran: 0, failed: [], results: [] }
   for (let index = 0; index < steps.length; index += STEP_CHUNK) {
     const chunk = steps.slice(index, index + STEP_CHUNK)
-    const run = engineRun(config, projectFile, chunk, { timeoutMs: opts.timeoutMs })
+    const run = engineRun(config, projectFile, chunk, { timeoutMs: opts.timeoutMs, keepGoing: !opts.stopOnFailure })
     out.ran += chunk.length
     if (!run.ok && !run.results.some((entry) => entry.ok === false)) out.failed.push({ id: chunk[0].id, error: '引擎未正常完成批处理（退出码 ' + run.status + '）' })
     for (let i = 0; i < run.results.length; i += 1) {
@@ -1079,6 +1087,13 @@ function runSteps(config, projectFile, steps, options) {
           line: result.line || 0,
           error: String(result.error || '失败'),
         })
+      }
+    }
+    if (opts.stopOnFailure) {
+      if (out.failed.length > 0) break
+      if (run.results.length !== chunk.length || run.results.some((entry) => entry?.ok !== true)) {
+        out.failed.push({ id: chunk[0].id, error: '引擎未确认写入完整批次' })
+        break
       }
     }
   }
@@ -1177,7 +1192,11 @@ function gradeClearClips(config, registry, request) {
 // agent would, and gets the per-command outcome back rather than a bare ok.
 function projectApply(config, registry, request) {
   const project = resolveProject(registry, request.project)
-  const commands = guardCommands(request.operation ? editWorkflowCommands(config, project.file, request) : request.commands)
+  const importingCaptions = request.operation === 'captionImport'
+  const planned = request.operation ? editWorkflowCommands(config, project.file, request) : request.commands
+  // The raw command limit is for caller-provided batches. SRT commands are
+  // generated from validated cues and use the existing engine chunking.
+  const commands = guardCommands(planned, importingCaptions ? Infinity : undefined)
   // dry-run answers "what would this do" without touching the file. The engine
   // has no plan mode of its own (every command just runs), so what can be
   // promised honestly is the exact command list plus which of the referenced
@@ -1206,13 +1225,20 @@ function projectApply(config, registry, request) {
   }
   const snapshot = snapshotTake(config, project.file)
   if (request.operation && !snapshot) throw new Error('无法建立撤销快照，尚未修改工程')
-  const run = runSteps(config, project.file, commands)
+  const atomic = request.atomic === true || !!request.operation
+  let run
+  try {
+    run = runSteps(config, project.file, commands, { stopOnFailure: importingCaptions })
+  } catch (error) {
+    if (!atomic || !snapshot) throw error
+    run = { ran: 0, failed: [{ error: error instanceof Error ? error.message : String(error) }] }
+  }
   // atomic (0.4.0): `run --keep-going` happily leaves a half-applied batch —
   // e.g. the first of two swap moves landed, the second did not. With atomic the
   // project goes back to the snapshot taken above, so a batch is all or nothing.
   let rolledBack = false
-  if ((request.atomic === true || request.operation) && run.failed.length > 0 && snapshot) {
-    const undone = snapshotUndo(config, project.file)
+  if (atomic && run.failed.length > 0 && snapshot) {
+    const undone = snapshotUndo(config, project.file, snapshot)
     rolledBack = undone.ok === true
     projectInvalidate(project.file)
   }
@@ -1223,6 +1249,7 @@ function projectApply(config, registry, request) {
     rolledBack: rolledBack,
     snapshot: snapshot && !rolledBack ? baseOf(snapshot) : null,
     detail: projectDetail(config, project.file, { force: true }),
+    ...(importingCaptions && run.failed.length === 0 ? { imported: commands.filter((command) => command.id === 'captions.add').length } : {}),
   }
 }
 
@@ -1531,6 +1558,35 @@ function editTimeTicks(value, fps, label) {
   return ticks
 }
 
+function captionTrackOf(sequence, id) {
+  const tracks = sequence.captionTracks || []
+  const track = id ? tracks.find((entry) => entry.id === id) : tracks[0]
+  if (id && !track) throw new Error('字幕轨已不存在')
+  if (track && track.locked) throw new Error('字幕轨已锁定')
+  return track
+}
+
+function captionFields(sequence, input) {
+  const text = String(input.text || '').trim()
+  if (!text || text.length > 4000) throw new Error('字幕内容须为 1–4000 个字符')
+  const start = editTimeTicks(input.start, sequence.fps, '字幕起点')
+  const end = editTimeTicks(input.end, sequence.fps, '字幕终点')
+  if (start < 0 || end <= start || end > Math.round(sequence.duration * TICKS_PER_SECOND) + 1) throw new Error('字幕起止时间须位于序列内，且对齐后至少保留一帧')
+  return { text, start, end }
+}
+
+function captionTrackSetup(sequence, track) {
+  if (track) return []
+  return [
+    { id: 'captions.newTrack', params: { format: 'Subtitle', name: '字幕', language: 'zh' } },
+    { id: 'captions.setStyle', params: { track: 'C1', font: process.platform === 'win32' ? 'Microsoft YaHei' : 'sans-serif', size: Math.max(12, Math.round(sequence.height * 0.05)), background: true } },
+  ]
+}
+
+function captionAddCommand(track, { text, start, end }) {
+  return { id: 'captions.add', params: { track: track ? track.id : 'C1', text, time: start, durationSeconds: (end - start) / TICKS_PER_SECOND } }
+}
+
 function editWorkflowCommands(config, projectFile, request) {
   const sequence = projectDetail(config, projectFile, { force: true }).sequence
   if (!sequence) throw new Error('请先打开一个序列')
@@ -1577,31 +1633,26 @@ function editWorkflowCommands(config, projectFile, request) {
     if (moves.length === 0) throw new Error('顺序没有变化')
     return [{ id: 'timeline.move', params: { moves: moves, linked: true, insert: false } }]
   }
+  if (request.operation === 'captionImport') {
+    const track = captionTrackOf(sequence, request.track)
+    const captions = parseSrtCaptions(request.srt, sequence)
+    return captionTrackSetup(sequence, track).concat(captions.map((caption) => captionAddCommand(track, caption)))
+  }
   if (request.operation === 'caption') {
-    const tracks = sequence.captionTracks || []
-    const track = request.track ? tracks.find((entry) => entry.id === request.track) : tracks[0]
-    if (request.track && !track) throw new Error('字幕轨已不存在')
-    if (track && track.locked) throw new Error('字幕轨已锁定')
+    const track = captionTrackOf(sequence, request.track)
     const caption = track && track.items.find((entry) => entry.id === request.caption)
     if (request.caption && !caption) throw new Error('字幕已不存在，请刷新后重试')
     if (request.remove === true) {
       if (!caption) throw new Error('请选择要删除的字幕')
       return [{ id: 'captions.delete', params: { captions: [caption.id], ripple: false } }]
     }
-    const text = String(request.text || '').trim()
-    if (!text || text.length > 4000) throw new Error('字幕内容须为 1–4000 个字符')
-    const start = tick(request.start, '字幕起点')
-    const end = tick(request.end, '字幕终点')
-    if (start < 0 || end <= start || end > Math.round(sequence.duration * TICKS_PER_SECOND) + 1) throw new Error('字幕起止时间须位于序列内，且终点晚于起点')
-    const steps = []
-    if (!track) {
-      steps.push({ id: 'captions.newTrack', params: { format: 'Subtitle', name: '字幕', language: 'zh' } })
-      steps.push({ id: 'captions.setStyle', params: { track: 'C1', font: process.platform === 'win32' ? 'Microsoft YaHei' : 'sans-serif', size: Math.max(12, Math.round(sequence.height * 0.05)), background: true } })
-    }
+    const fields = captionFields(sequence, request)
+    const steps = captionTrackSetup(sequence, track)
     if (caption) {
+      const { text, start, end } = fields
       steps.push({ id: 'captions.setText', params: { caption: caption.id, text: text } })
       steps.push({ id: 'captions.setTimes', params: { caption: caption.id, startTime: start, endTime: end } })
-    } else steps.push({ id: 'captions.add', params: { track: track ? track.id : 'C1', text: text, time: start, durationSeconds: (end - start) / TICKS_PER_SECOND } })
+    } else steps.push(captionAddCommand(track, fields))
     return steps
   }
   if (request.operation === 'transition') {
@@ -1622,6 +1673,49 @@ function editWorkflowCommands(config, projectFile, request) {
     return [{ id: 'sequence.applyVideoTransition', params: { clip: clip.clip, effect: request.effect, edge: request.edge, frames: Math.round(duration / TICKS_PER_SECOND * sequence.fps) } }]
   }
   throw new Error('未知的剪辑操作')
+}
+
+// ── host/46-srt.js ───────────────────────────────────────────────────
+// SRT cues use elapsed time in milliseconds. Round to sequence frames only
+// after checking the original range so a small overrun cannot round into bounds.
+function srtSeconds(value) {
+  const time = /^(\d{2,}):([0-5]\d):([0-5]\d)[,.](\d{3})$/.exec(value)
+  if (!time) throw new Error('时间格式应为 00:00:00,000 --> 00:00:01,000')
+  return Number(time[1]) * 3600 + Number(time[2]) * 60 + Number(time[3]) + Number(time[4]) / 1000
+}
+
+function parseSrtCaptions(srt, sequence) {
+  if (typeof srt !== 'string') throw new Error('请选择 UTF-8 编码的 SRT 文件')
+  const lines = srt.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/)
+  const captions = []
+  let cursor = 0
+  while (cursor < lines.length) {
+    if (!lines[cursor].trim()) {
+      cursor += 1
+      continue
+    }
+    const firstLine = cursor + 1
+    const location = 'SRT 第 ' + (captions.length + 1) + ' 条（第 ' + firstLine + ' 行）'
+    try {
+      if (!/^\d+$/.test(lines[cursor].trim())) throw new Error('缺少数字序号')
+      const timing = (lines[cursor + 1] || '').trim().split(/\s*-->\s*/)
+      if (timing.length !== 2) throw new Error('时间行须用 --> 分隔起点和终点')
+      const start = srtSeconds(timing[0])
+      const end = srtSeconds(timing[1])
+      if (end <= start || end > sequence.duration + 1 / TICKS_PER_SECOND) throw new Error('字幕起止时间须位于序列内，且终点晚于起点')
+      cursor += 2
+      const textStart = cursor
+      while (cursor < lines.length && lines[cursor].trim()) {
+        if (/^\d+$/.test(lines[cursor].trim()) && /^\s*\d{2,}:\d{2}:\d{2}[,.]/.test(lines[cursor + 1] || '')) throw new Error('第 ' + (cursor + 1) + ' 行前缺少分隔字幕的空行')
+        cursor += 1
+      }
+      captions.push(captionFields(sequence, { start, end, text: lines.slice(textStart, cursor).join('\n') }))
+    } catch (error) {
+      throw new Error(location + '：' + error.message)
+    }
+  }
+  if (captions.length === 0) throw new Error('SRT 文件中没有字幕')
+  return captions
 }
 
 // ── host/50-jobs.js ──────────────────────────────────────────────────
@@ -2915,7 +3009,10 @@ function mcpServe(registry) {
       }
     }
   })
-  process.stdin.on('end', () => { mcpQueue.then(() => process.exit(0)) })
+  process.stdin.on('end', () => {
+    // Queued handlers can finish before their replies reach the stdout pipe.
+    mcpQueue.then(() => process.stdout.end(() => process.exit(0)))
+  })
 }
 
 // ── mcp/20-time.js ──────────────────────────────────────────────────
@@ -3862,9 +3959,10 @@ function mcpRegistry() {
 
 if (process.argv.includes('--list-tools')) {
   for (const tool of mcpRegistry().list()) process.stdout.write(tool.name + '\t' + tool.spec.title + '\n')
-  process.exit(0)
+} else if (process.argv.includes('--version')) {
+  process.stdout.write(PLUGIN_VERSION + '\n')
+} else {
+  mcpLog('v' + PLUGIN_VERSION + ' ready, cli=' + winPath(mcpConfig().cliPath) + ', tools=' + mcpRegistry().list().length + (mcpReadOnly() ? ' (read-only)' : ''))
+  mcpServe(mcpRegistry())
 }
-if (process.argv.includes('--version')) { process.stdout.write(PLUGIN_VERSION + '\n'); process.exit(0) }
-mcpLog('v' + PLUGIN_VERSION + ' ready, cli=' + winPath(mcpConfig().cliPath) + ', tools=' + mcpRegistry().list().length + (mcpReadOnly() ? ' (read-only)' : ''))
-mcpServe(mcpRegistry())
 

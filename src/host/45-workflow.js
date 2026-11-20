@@ -19,6 +19,35 @@ function editTimeTicks(value, fps, label) {
   return ticks
 }
 
+function captionTrackOf(sequence, id) {
+  const tracks = sequence.captionTracks || []
+  const track = id ? tracks.find((entry) => entry.id === id) : tracks[0]
+  if (id && !track) throw new Error('字幕轨已不存在')
+  if (track && track.locked) throw new Error('字幕轨已锁定')
+  return track
+}
+
+function captionFields(sequence, input) {
+  const text = String(input.text || '').trim()
+  if (!text || text.length > 4000) throw new Error('字幕内容须为 1–4000 个字符')
+  const start = editTimeTicks(input.start, sequence.fps, '字幕起点')
+  const end = editTimeTicks(input.end, sequence.fps, '字幕终点')
+  if (start < 0 || end <= start || end > Math.round(sequence.duration * TICKS_PER_SECOND) + 1) throw new Error('字幕起止时间须位于序列内，且对齐后至少保留一帧')
+  return { text, start, end }
+}
+
+function captionTrackSetup(sequence, track) {
+  if (track) return []
+  return [
+    { id: 'captions.newTrack', params: { format: 'Subtitle', name: '字幕', language: 'zh' } },
+    { id: 'captions.setStyle', params: { track: 'C1', font: process.platform === 'win32' ? 'Microsoft YaHei' : 'sans-serif', size: Math.max(12, Math.round(sequence.height * 0.05)), background: true } },
+  ]
+}
+
+function captionAddCommand(track, { text, start, end }) {
+  return { id: 'captions.add', params: { track: track ? track.id : 'C1', text, time: start, durationSeconds: (end - start) / TICKS_PER_SECOND } }
+}
+
 function editWorkflowCommands(config, projectFile, request) {
   const sequence = projectDetail(config, projectFile, { force: true }).sequence
   if (!sequence) throw new Error('请先打开一个序列')
@@ -65,31 +94,26 @@ function editWorkflowCommands(config, projectFile, request) {
     if (moves.length === 0) throw new Error('顺序没有变化')
     return [{ id: 'timeline.move', params: { moves: moves, linked: true, insert: false } }]
   }
+  if (request.operation === 'captionImport') {
+    const track = captionTrackOf(sequence, request.track)
+    const captions = parseSrtCaptions(request.srt, sequence)
+    return captionTrackSetup(sequence, track).concat(captions.map((caption) => captionAddCommand(track, caption)))
+  }
   if (request.operation === 'caption') {
-    const tracks = sequence.captionTracks || []
-    const track = request.track ? tracks.find((entry) => entry.id === request.track) : tracks[0]
-    if (request.track && !track) throw new Error('字幕轨已不存在')
-    if (track && track.locked) throw new Error('字幕轨已锁定')
+    const track = captionTrackOf(sequence, request.track)
     const caption = track && track.items.find((entry) => entry.id === request.caption)
     if (request.caption && !caption) throw new Error('字幕已不存在，请刷新后重试')
     if (request.remove === true) {
       if (!caption) throw new Error('请选择要删除的字幕')
       return [{ id: 'captions.delete', params: { captions: [caption.id], ripple: false } }]
     }
-    const text = String(request.text || '').trim()
-    if (!text || text.length > 4000) throw new Error('字幕内容须为 1–4000 个字符')
-    const start = tick(request.start, '字幕起点')
-    const end = tick(request.end, '字幕终点')
-    if (start < 0 || end <= start || end > Math.round(sequence.duration * TICKS_PER_SECOND) + 1) throw new Error('字幕起止时间须位于序列内，且终点晚于起点')
-    const steps = []
-    if (!track) {
-      steps.push({ id: 'captions.newTrack', params: { format: 'Subtitle', name: '字幕', language: 'zh' } })
-      steps.push({ id: 'captions.setStyle', params: { track: 'C1', font: process.platform === 'win32' ? 'Microsoft YaHei' : 'sans-serif', size: Math.max(12, Math.round(sequence.height * 0.05)), background: true } })
-    }
+    const fields = captionFields(sequence, request)
+    const steps = captionTrackSetup(sequence, track)
     if (caption) {
+      const { text, start, end } = fields
       steps.push({ id: 'captions.setText', params: { caption: caption.id, text: text } })
       steps.push({ id: 'captions.setTimes', params: { caption: caption.id, startTime: start, endTime: end } })
-    } else steps.push({ id: 'captions.add', params: { track: track ? track.id : 'C1', text: text, time: start, durationSeconds: (end - start) / TICKS_PER_SECOND } })
+    } else steps.push(captionAddCommand(track, fields))
     return steps
   }
   if (request.operation === 'transition') {

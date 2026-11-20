@@ -41,7 +41,7 @@
   "scripts": {
     "build": "node scripts/build-native.mjs && node scripts/build-mcp.mjs",
     "mcp": "node dist/mcp/filmcraft-mcp.mjs",
-    "test": "node --test test/timeline.test.mjs test/editing-time.test.mjs && node test-client.mjs && node test/mcp-smoke.mjs && node test/editing-host.mjs",
+    "test": "node --test test/timeline.test.mjs test/editing-time.test.mjs test/mcp-stdio.test.mjs && node test-client.mjs && node test/mcp-smoke.mjs && node test/editing-host.mjs",
     "test:mcp": "node test/mcp-smoke.mjs",
     "test:real": "node test/mcp-smoke.mjs --real && node test/editing-host.mjs --real",
     "test:editing": "node test/editing-host.mjs",

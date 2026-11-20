@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import assert from 'node:assert/strict'
 import { inflateSync } from 'node:zlib'
 import { makeRealFixtures } from './make-real-fixtures.mjs'
@@ -26,7 +26,7 @@ if (!process.argv.includes('--child')) {
     writeFileSync(join(configDir, 'config.json'), JSON.stringify({ root: join(tmp, 'ws'), cliPath: cli }))
     writeFileSync(join(tmp, 'files.json'), JSON.stringify(files))
     const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--child', ...(real ? ['--real'] : [])], {
-      env: { ...process.env, USERPROFILE: tmp, HOME: tmp, FILMCRAFT_EDITING_TEST_ROOT: tmp, FILMCRAFT_EDITING_CLI: cli }, stdio: 'inherit', windowsHide: true, timeout: 180000,
+      env: { ...process.env, USERPROFILE: tmp, HOME: tmp, FILMCRAFT_EDITING_TEST_ROOT: tmp, FILMCRAFT_EDITING_CLI: cli, FILMCRAFT_MOCK_REJECT_CAPTION: '模拟写入失败' }, stdio: 'inherit', windowsHide: true, timeout: 180000,
     })
     if (result.error) throw result.error
     process.exitCode = result.status ?? 1
@@ -47,10 +47,15 @@ if (!process.argv.includes('--child')) {
   let checks = 0
   function check(condition, message) { assert.ok(condition, message); checks++; console.log('✔ ' + message) }
   async function request(path, body, method = 'POST', fail = false) {
-    const req = new EventEmitter(); req.method = method; req.headers = {}; req.url = '/dsh-filmcraft-progress/api/' + path
+    const req = new PassThrough(); req.method = method; req.headers = {}; req.url = '/dsh-filmcraft-progress/api/' + path
     if (method === 'GET') req.url += '?' + new URLSearchParams(body)
     const res = { code: 0, text: '', writeHead(code) { this.code = code }, end(value) { this.text = String(value || '') } }
-    setTimeout(() => { if (method === 'POST') req.emit('data', JSON.stringify(body)); req.emit('end') }, 0)
+    if (method === 'POST') {
+      const payload = Buffer.from(JSON.stringify(body))
+      const split = payload.indexOf('中文批量')
+      if (split !== -1) req.write(payload.subarray(0, split + 1))
+      req.end(split === -1 ? payload : payload.subarray(split + 1))
+    } else req.end()
     await routes.get('/dsh-filmcraft-progress/api/' + path).handler(req, res)
     const result = JSON.parse(res.text)
     if (!fail) assert.equal(res.code, 200, JSON.stringify(result))
@@ -109,6 +114,33 @@ if (!process.argv.includes('--child')) {
     return inflateSync(Buffer.concat(blocks))
   }
   const baseline = await frame('baseline', 1)
+  const firstCue = '1\r\n00:00:01,017 --> 00:00:01,479\r\n中文批量\r\n第二行'
+  const secondCue = '2\r\n00:00:04,021 --> 00:00:05,000\r\n下一条'
+  const srt = '\uFEFF' + firstCue + '\r\n\r\n' + secondCue + '\r\n'
+  const projectBeforeImport = readFileSync(project)
+  for (const [time, error] of [
+    ['00:60:04,021 --> 00:00:05,000', /时间格式/],
+    ['00:00:04,021 --> 00:00:13,001', /序列内/],
+    ['00:00:05,000 --> 00:00:04,000', /终点晚于起点/],
+    ['00:00:04,001 --> 00:00:04,010', /至少保留一帧/],
+  ]) {
+    const invalidSrt = srt.replace('00:00:04,021 --> 00:00:05,000', time)
+    const rejected = await edit({ operation: 'captionImport', srt: invalidSrt }, true)
+    assert.match(rejected.error, /SRT 第 2 条（第 6 行）/)
+    assert.match(rejected.error, error)
+    assert.deepEqual(readFileSync(project), projectBeforeImport)
+  }
+  check(true, 'SRT identifies malformed, out-of-range, reversed and sub-frame cues before writing')
+  const withoutSeparator = await edit({ operation: 'captionImport', srt: firstCue + '\r\n' + secondCue }, true)
+  check(/第 5 行前缺少分隔/.test(withoutSeparator.error) && readFileSync(project).equals(projectBeforeImport), 'SRT rejects a missing empty line between cues')
+  const imported = await edit({ operation: 'captionImport', srt })
+  const importedTrack = detail.sequence.captionTracks[0]
+  check(imported.imported === 2 && importedTrack.label === 'C1' && importedTrack.items[0].text === '中文批量\n第二行' && importedTrack.items[1].text === '下一条', 'SRT BOM, CRLF and split UTF-8 chunks preserve multiline Chinese captions in a new track')
+  check(importedTrack.items[0].start === 1 && importedTrack.items[0].end === 1.48 && importedTrack.items[1].start === 4.04, 'SRT cues align to the sequence frame grid')
+  if (real) check(!pngData(baseline).equals(pngData(await frame('srt', 1))), 'SRT subtitles change rendered frame pixels')
+  await undo()
+  check(detail.sequence.captionTracks.length === 0 && readFileSync(project).equals(projectBeforeImport), 'one undo removes the SRT import and its new track')
+
   await edit({ operation: 'caption', text: '中文剪辑验收\nFilmCraft', start: '25f', end: '75f' })
   let track = detail.sequence.captionTracks[0]
   let caption = track.items[0]
@@ -121,6 +153,34 @@ if (!process.argv.includes('--child')) {
   check((await edit({ operation: 'caption', text: '越界', start: '-1', end: '2' }, true)).error, 'reject subtitle outside sequence')
   await edit({ operation: 'caption', track: track.id, caption: caption.id, remove: true }); check(detail.sequence.captionTracks[0].items.length === 0, 'delete subtitle')
   await undo(); check(detail.sequence.captionTracks[0].items.length === 1, 'undo restores subtitle')
+  const beforeAppend = readFileSync(project)
+  const appended = await edit({ operation: 'captionImport', srt: secondCue })
+  check(appended.imported === 1 && detail.sequence.captionTracks.length === 1 && detail.sequence.captionTracks[0].items.some((entry) => entry.id === caption.id) && detail.sequence.captionTracks[0].items.some((entry) => entry.text === '下一条'), 'SRT appends to the existing track and keeps existing captions')
+  let otherProject
+  let otherAfterImport
+  if (!real) {
+    otherProject = join(dirname(project), '另一工程.fcproj')
+    writeFileSync(otherProject, projectBeforeImport)
+    const other = await request('edit', { project: otherProject, sequence: detail.sequence.id, operation: 'captionImport', srt: secondCue })
+    assert.equal(other.imported, 1, JSON.stringify(other))
+    otherAfterImport = readFileSync(otherProject)
+  }
+  await undo()
+  check(detail.sequence.captionTracks[0].items.length === 1 && readFileSync(project).equals(beforeAppend), 'one undo removes only the appended SRT captions')
+  if (!real) {
+    check(readFileSync(otherProject).equals(otherAfterImport), 'undo is isolated across projects with different Chinese filenames')
+    await request('undo', { project: otherProject })
+    check(readFileSync(otherProject).equals(projectBeforeImport), 'the other project retains its own SRT undo')
+    const timestamp = (frame) => {
+      const millis = frame * 40
+      return '00:00:' + String(Math.floor(millis / 1000)).padStart(2, '0') + ',' + String(millis % 1000).padStart(3, '0')
+    }
+    const largeSrt = Array.from({ length: 252 }, (_, index) => [
+      index + 1, timestamp(index) + ' --> ' + timestamp(index + 1), index === 250 ? '模拟写入失败' : '字幕 ' + index,
+    ].join('\n')).join('\n\n')
+    const failedImport = await edit({ operation: 'captionImport', srt: largeSrt }, true)
+    check(failedImport.ok === false && failedImport.rolledBack && failedImport.ran > 250 && /mock caption write failed/.test(failedImport.failed[0].error) && readFileSync(project).equals(beforeAppend), 'a write failure in a later SRT batch rolls back every previous batch')
+  }
   const transitionBaseline = await frame('transition-baseline', 0.2)
   await edit({ operation: 'transition', clip, effect: 'dip_to_black', edge: 'in', duration: '12f' })
   let transition = detail.sequence.tracks.video[0].transitions.find((entry) => entry.to === clip || entry.from === clip)

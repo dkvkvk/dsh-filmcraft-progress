@@ -26,10 +26,21 @@ function CaptionEditor() {
   const tracks = sequence.captionTracks || []
   const draft = store.captionDraft
   const busy = store.busy !== ''
+  const srtInput = React.useRef(null)
   const set = function (key) { return function (event) { draft[key] = event.target.value; fcEmit() } }
   return h(FcSection, { title: '字幕' },
     h('div', { className: 'fc-row' },
       h(FcBtn, { disabled: busy, onClick: fcCaptionNew }, '从播放头新建'),
+      h(FcBtn, { disabled: busy, onClick: function () { srtInput.current.click() } }, '导入 SRT'),
+      h('input', {
+        type: 'file', accept: '.srt', hidden: true, ref: srtInput, disabled: busy, 'aria-label': '选择 SRT 字幕',
+        onChange: function (event) {
+          const input = event.currentTarget
+          const file = input.files[0]
+          input.value = ''
+          if (file) return fcCaptionImport(file)
+        },
+      }),
       h('span', { className: 'fc-clip-t' }, draft.id ? '正在修改字幕' : '新字幕')),
     h('textarea', { className: 'fc-caption-text', 'aria-label': '字幕内容', placeholder: '输入字幕，支持换行', maxLength: 4000, value: draft.text, disabled: busy, onChange: set('text') }),
     h('div', { className: 'fc-row' },

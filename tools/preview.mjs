@@ -53,7 +53,8 @@ const React = {
   },
   useMemo(fn) { return fn() },
   useRef(value) {
-    const slots = hooksByOwner.get(hookOwner)
+    const slots = hooksByOwner.get(hookOwner) || []
+    hooksByOwner.set(hookOwner, slots)
     const index = hookIndex++
     const slot = slots[index] || (slots[index] = { value: { current: value } })
     return slot.value

@@ -111,6 +111,7 @@ const nativeHost = [
   '',
   'function readBody(req) {',
   '  return new Promise((resolve, reject) => {',
+  "    req.setEncoding?.('utf8')",
   "    let raw = ''",
   "    req.on('data', (chunk) => {",
   '      raw += chunk',

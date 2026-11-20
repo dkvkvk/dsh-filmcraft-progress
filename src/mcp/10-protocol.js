@@ -98,5 +98,8 @@ function mcpServe(registry) {
       }
     }
   })
-  process.stdin.on('end', () => { mcpQueue.then(() => process.exit(0)) })
+  process.stdin.on('end', () => {
+    // Queued handlers can finish before their replies reach the stdout pipe.
+    mcpQueue.then(() => process.stdout.end(() => process.exit(0)))
+  })
 }
