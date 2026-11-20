@@ -127,15 +127,18 @@ function engineRun(config, projectFile, steps, options) {
   writeFileSync(scriptFile, lines.join('\n') + '\n', 'utf8')
   const args = ['run', scriptFile, '--save', '--compact']
   if (opts.keepGoing !== false) args.push('--keep-going')
-  const result = engineJson(config, args, {
-    project: projectFile,
-    label: 'run-' + steps[0].id.replace(/[^a-z0-9]+/gi, '-'),
-    what: '批处理',
-    timeoutMs: opts.timeoutMs || ENGINE_TIMEOUT_LONG_MS,
-    allowFailure: true,
-  })
-  try { unlinkSync(scriptFile) } catch (_) { }
-  return { results: collectResults(result.json, result.text), raw: result.json, ok: result.ok, status: result.status }
+  try {
+    const result = engineJson(config, args, {
+      project: projectFile,
+      label: 'run-' + steps[0].id.replace(/[^a-z0-9]+/gi, '-'),
+      what: '批处理',
+      timeoutMs: opts.timeoutMs || ENGINE_TIMEOUT_LONG_MS,
+      allowFailure: true,
+    })
+    return { results: collectResults(result.json, result.text), raw: result.json, ok: result.ok, status: result.status }
+  } finally {
+    try { unlinkSync(scriptFile) } catch (_) { }
+  }
 }
 
 // `run --compact` emits one JSON object per line; a single command emits one
@@ -193,9 +196,13 @@ function probeMedia(config, file) {
 // first; undo restores the newest copy. 20 deep is enough for a hand-cut session
 // and small because .fcproj holds references, not media.
 const SNAPSHOT_KEEP = 20
+function snapshotFolder(config, projectFile) {
+  const projectKey = lockKey(uniqSlashes(projectFile).toLowerCase())
+  return joinPath(pathsOf(config.root).snapshots, '.by-project', projectKey)
+}
+
 function snapshotTake(config, projectFile) {
-  const paths = pathsOf(config.root)
-  const folder = joinPath(paths.snapshots, String(stemOf(projectFile)).replace(/[^A-Za-z0-9_.-]+/g, '_'))
+  const folder = snapshotFolder(config, projectFile)
   ensureDir(folder)
   const name = new Date().toISOString().replace(/[:.]/g, '-') + '-' + Math.floor(Math.random() * 1000) + '.fcproj'
   const target = joinPath(folder, name)
@@ -208,19 +215,20 @@ function snapshotTake(config, projectFile) {
   return target
 }
 function snapshotNewest(config, projectFile) {
-  const paths = pathsOf(config.root)
-  const folder = joinPath(paths.snapshots, String(stemOf(projectFile)).replace(/[^A-Za-z0-9_.-]+/g, '_'))
-  const files = listDir(folder).filter((entry) => entry.isFile()).map((entry) => entry.name).sort()
-  if (files.length === 0) return null
-  return joinPath(folder, files[files.length - 1])
+  const legacyFolder = joinPath(pathsOf(config.root).snapshots, stemOf(projectFile).replace(/[^A-Za-z0-9_.-]+/g, '_'))
+  // Look up old snapshots after the per-project history has been exhausted.
+  for (const folder of [snapshotFolder(config, projectFile), legacyFolder]) {
+    const files = listDir(folder).filter((entry) => entry.isFile()).map((entry) => entry.name).sort()
+    if (files.length > 0) return joinPath(folder, files[files.length - 1])
+  }
+  return null
 }
-function snapshotUndo(config, projectFile) {
-  const newest = snapshotNewest(config, projectFile)
-  if (!newest) return { ok: false, error: '没有可撤销的快照' }
-  copyFileSync(newest, projectFile)
-  try { unlinkSync(newest) } catch (_) { }
-  const remaining = listDir(dirOf(newest)).filter((entry) => entry.isFile()).length
-  return { ok: true, restored: baseOf(newest), remaining }
+function snapshotUndo(config, projectFile, snapshot = snapshotNewest(config, projectFile)) {
+  if (!snapshot) return { ok: false, error: '没有可撤销的快照' }
+  copyFileSync(snapshot, projectFile)
+  try { unlinkSync(snapshot) } catch (_) { }
+  const remaining = listDir(dirOf(snapshot)).filter((entry) => entry.isFile()).length
+  return { ok: true, restored: baseOf(snapshot), remaining }
 }
 
 // ── command whitelist ───────────────────────────────────────────────────────
@@ -276,9 +284,9 @@ const EDIT_COMMANDS = {
   'markers.clearAll': true,
   'project.delete': true,
 }
-function guardCommands(commands) {
+function guardCommands(commands, limit = 400) {
   if (!Array.isArray(commands) || commands.length === 0) throw new Error('commands 不能为空')
-  if (commands.length > 400) throw new Error('一次最多 400 条命令')
+  if (commands.length > limit) throw new Error('一次最多 ' + limit + ' 条命令')
   return commands.map((command) => {
     const id = command && command.id
     if (typeof id !== 'string' || EDIT_COMMANDS[id] !== true) {

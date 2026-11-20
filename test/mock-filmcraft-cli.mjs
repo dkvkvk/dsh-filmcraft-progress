@@ -94,6 +94,8 @@ const COMMANDS = {
   },
   'captions.setStyle': (p) => { Object.assign(captionTrack(p.track).style, p); return {} },
   'captions.add': (p) => {
+    const rejectedText = process.env.FILMCRAFT_MOCK_REJECT_CAPTION
+    if (rejectedText && p.text === rejectedText) throw new Error('mock caption write failed')
     const caption = P.nextId++
     captionTrack(p.track).captions.push({ id: caption, text: p.text, start: p.time || 0, end: (p.time || 0) + Math.round(p.durationSeconds * TPS) })
     return { caption }

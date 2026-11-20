@@ -63,7 +63,8 @@ const React = {
   },
   useMemo(fn) { return fn() },
   useRef(value) {
-    const slots = hooksByOwner.get(hookOwner)
+    const slots = hooksByOwner.get(hookOwner) || []
+    hooksByOwner.set(hookOwner, slots)
     const index = hookIndex++
     const slot = slots[index] || (slots[index] = { value: { current: value } })
     return slot.value
@@ -165,6 +166,11 @@ globalThis.fetch = async (path, init) => {
   else if (path.indexOf('/api/state') >= 0) value = { ok: true, present: false, state: null }
   else if (path.indexOf('/api/edit') >= 0) {
     if (body.operation === 'caption') SEQUENCE.captionTracks = [{ id: 301, label: 'C1', items: [{ id: 302, text: body.text, start: 0, end: 3 }] }]
+    if (body.operation === 'captionImport') {
+      if (body.srt === '错误用例') return { ok: false, status: 500, json: async () => ({ error: 'SRT 第 2 条（第 6 行）：字幕起止时间须位于序列内' }) }
+      SEQUENCE.captionTracks[0].items.push({ id: 303, text: '导入字幕\n第二行', start: 3, end: 4 })
+      return { ok: true, json: async () => ({ ok: true, imported: 1, detail: detail() }) }
+    }
     if (body.operation === 'transition') SEQUENCE.tracks.video[0].transitions = [{ id: 401, from: 69, to: 70, start: 9.3, dur: 0.2, effect: body.effect }]
     value = { ok: true, ran: 1, failed: [], snapshot: 'x', detail: detail() }
   }
@@ -287,13 +293,13 @@ function textOf(node, out) {
   if (node.children) for (const child of node.children) textOf(child, out)
   return out
 }
-function findNodes(node, className, out) {
+function findNodes(node, match, out) {
   out = out || []
   if (node === null || typeof node !== 'object') return out
-  if (Array.isArray(node)) { for (const item of node) findNodes(item, className, out); return out }
+  if (Array.isArray(node)) { for (const item of node) findNodes(item, match, out); return out }
   const cn = node.props ? node.props.className : null
-  if (typeof cn === 'string' && cn.split(' ').indexOf(className) >= 0) out.push(node)
-  if (node.children) for (const child of node.children) findNodes(child, className, out)
+  if (typeof match === 'function' ? match(node) : typeof cn === 'string' && cn.split(' ').includes(match)) out.push(node)
+  if (node.children) for (const child of node.children) findNodes(child, match, out)
   return out
 }
 function findClickable(node, label, out) {
@@ -417,6 +423,24 @@ console.log('\n── 拖拽、逐帧、字幕和转场 ──')
   const caption = calls.filter((call) => call.body && call.body.operation === 'caption').at(-1)
   check(caption.body.text === '中文字幕\n第二行' && caption.body.start === '0' && caption.body.end === '3', '字幕保存文字与起止时间')
   check(findNodes(tree, 'fc-caption-row').length === 1 && findNodes(tree, 'fc-tl-clip').some((node) => /caption/.test(node.props.className)), '字幕出现在列表和时间线')
+  const picker = findNodes(tree, (node) => node.type === 'input' && node.props.type === 'file')[0]
+  let opened = false
+  picker.props.ref.current.click = () => { opened = true }
+  findClickable(tree, '导入 SRT')[0].props.onClick()
+  check(opened && picker.props.accept === '.srt', '导入按钮打开 SRT 文件选择器')
+  const validSrt = '1\r\n00:00:03,000 --> 00:00:04,000\r\n导入字幕\r\n第二行'
+  const input = { files: [new File(['\uFEFF', validSrt], '中文字幕.SRT')], value: 'selected' }
+  await picker.props.onChange({ currentTarget: input })
+  tree = paint('导入 SRT')
+  const imports = () => calls.filter((call) => call.body?.operation === 'captionImport')
+  check(input.value === '' && imports()[0]?.body.srt === validSrt && imports()[0]?.body.sequence === SEQUENCE.id, '以 UTF-8 读取 SRT 并提交一次当前序列编辑请求')
+  check(findNodes(tree, 'fc-caption-row').length === 2 && findText(tree, '已导入 1 条字幕'), '导入后刷新字幕并显示条数')
+  await picker.props.onChange({ currentTarget: { files: [new File([new Uint8Array([0xC3, 0x28])], '错误编码.srt')] } })
+  tree = paint('SRT 编码错误')
+  check(imports().length === 1 && findText(tree, '文件不是有效的 UTF-8'), '编码错误时提示另存为 UTF-8 且不提交')
+  await picker.props.onChange({ currentTarget: { files: [new File(['错误用例'], '越界.srt')] } })
+  tree = paint('SRT 条目错误')
+  check(findText(tree, 'SRT 第 2 条（第 6 行）') && findNodes(tree, 'fc-caption-row').length === 2, '显示宿主返回的条目位置并保留已有字幕')
   findClickable(tree, '添加转场')[0].props.onClick()
   await sleep(80); tree = paint('转场保存')
   const transition = calls.filter((call) => call.body && call.body.operation === 'transition').at(-1)

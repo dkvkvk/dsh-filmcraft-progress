@@ -15,7 +15,7 @@ function runSteps(config, projectFile, steps, options) {
   const out = { ran: 0, failed: [], results: [] }
   for (let index = 0; index < steps.length; index += STEP_CHUNK) {
     const chunk = steps.slice(index, index + STEP_CHUNK)
-    const run = engineRun(config, projectFile, chunk, { timeoutMs: opts.timeoutMs })
+    const run = engineRun(config, projectFile, chunk, { timeoutMs: opts.timeoutMs, keepGoing: !opts.stopOnFailure })
     out.ran += chunk.length
     if (!run.ok && !run.results.some((entry) => entry.ok === false)) out.failed.push({ id: chunk[0].id, error: '引擎未正常完成批处理（退出码 ' + run.status + '）' })
     for (let i = 0; i < run.results.length; i += 1) {
@@ -31,6 +31,13 @@ function runSteps(config, projectFile, steps, options) {
           line: result.line || 0,
           error: String(result.error || '失败'),
         })
+      }
+    }
+    if (opts.stopOnFailure) {
+      if (out.failed.length > 0) break
+      if (run.results.length !== chunk.length || run.results.some((entry) => entry?.ok !== true)) {
+        out.failed.push({ id: chunk[0].id, error: '引擎未确认写入完整批次' })
+        break
       }
     }
   }
@@ -129,7 +136,11 @@ function gradeClearClips(config, registry, request) {
 // agent would, and gets the per-command outcome back rather than a bare ok.
 function projectApply(config, registry, request) {
   const project = resolveProject(registry, request.project)
-  const commands = guardCommands(request.operation ? editWorkflowCommands(config, project.file, request) : request.commands)
+  const importingCaptions = request.operation === 'captionImport'
+  const planned = request.operation ? editWorkflowCommands(config, project.file, request) : request.commands
+  // The raw command limit is for caller-provided batches. SRT commands are
+  // generated from validated cues and use the existing engine chunking.
+  const commands = guardCommands(planned, importingCaptions ? Infinity : undefined)
   // dry-run answers "what would this do" without touching the file. The engine
   // has no plan mode of its own (every command just runs), so what can be
   // promised honestly is the exact command list plus which of the referenced
@@ -158,13 +169,20 @@ function projectApply(config, registry, request) {
   }
   const snapshot = snapshotTake(config, project.file)
   if (request.operation && !snapshot) throw new Error('无法建立撤销快照，尚未修改工程')
-  const run = runSteps(config, project.file, commands)
+  const atomic = request.atomic === true || !!request.operation
+  let run
+  try {
+    run = runSteps(config, project.file, commands, { stopOnFailure: importingCaptions })
+  } catch (error) {
+    if (!atomic || !snapshot) throw error
+    run = { ran: 0, failed: [{ error: error instanceof Error ? error.message : String(error) }] }
+  }
   // atomic (0.4.0): `run --keep-going` happily leaves a half-applied batch —
   // e.g. the first of two swap moves landed, the second did not. With atomic the
   // project goes back to the snapshot taken above, so a batch is all or nothing.
   let rolledBack = false
-  if ((request.atomic === true || request.operation) && run.failed.length > 0 && snapshot) {
-    const undone = snapshotUndo(config, project.file)
+  if (atomic && run.failed.length > 0 && snapshot) {
+    const undone = snapshotUndo(config, project.file, snapshot)
     rolledBack = undone.ok === true
     projectInvalidate(project.file)
   }
@@ -175,6 +193,7 @@ function projectApply(config, registry, request) {
     rolledBack: rolledBack,
     snapshot: snapshot && !rolledBack ? baseOf(snapshot) : null,
     detail: projectDetail(config, project.file, { force: true }),
+    ...(importingCaptions && run.failed.length === 0 ? { imported: commands.filter((command) => command.id === 'captions.add').length } : {}),
   }
 }
 
