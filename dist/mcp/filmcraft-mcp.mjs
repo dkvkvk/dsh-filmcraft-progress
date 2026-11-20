@@ -2915,7 +2915,10 @@ function mcpServe(registry) {
       }
     }
   })
-  process.stdin.on('end', () => { mcpQueue.then(() => process.exit(0)) })
+  process.stdin.on('end', () => {
+    // Queued handlers can finish before their replies reach the stdout pipe.
+    mcpQueue.then(() => process.stdout.end(() => process.exit(0)))
+  })
 }
 
 // ── mcp/20-time.js ──────────────────────────────────────────────────
@@ -3862,9 +3865,10 @@ function mcpRegistry() {
 
 if (process.argv.includes('--list-tools')) {
   for (const tool of mcpRegistry().list()) process.stdout.write(tool.name + '\t' + tool.spec.title + '\n')
-  process.exit(0)
+} else if (process.argv.includes('--version')) {
+  process.stdout.write(PLUGIN_VERSION + '\n')
+} else {
+  mcpLog('v' + PLUGIN_VERSION + ' ready, cli=' + winPath(mcpConfig().cliPath) + ', tools=' + mcpRegistry().list().length + (mcpReadOnly() ? ' (read-only)' : ''))
+  mcpServe(mcpRegistry())
 }
-if (process.argv.includes('--version')) { process.stdout.write(PLUGIN_VERSION + '\n'); process.exit(0) }
-mcpLog('v' + PLUGIN_VERSION + ' ready, cli=' + winPath(mcpConfig().cliPath) + ', tools=' + mcpRegistry().list().length + (mcpReadOnly() ? ' (read-only)' : ''))
-mcpServe(mcpRegistry())
 
